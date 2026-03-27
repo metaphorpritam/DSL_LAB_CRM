@@ -1,6 +1,6 @@
 # DSL_LAB — Session Summary
 
-**Last updated:** 2026-03-27 · Give Me Some Credit (Kaggle) · Credit-Default Modelling
+**Last updated:** 2026-03-27 · Give Me Some Credit (Kaggle) · Credit-Default Modelling · session 2 additions: summary notebook, 3D UMAP animations, SHAP feature importance
 
 ---
 
@@ -13,7 +13,7 @@
 - Default rate ≈ 6.7% → class imbalance ratio ≈ 13.5:1
 - Basel II/III context: PD estimation has direct regulatory and capital consequences
 
-**Toolchain**: Python 3 + uv, Jupyter, PyTorch, XGBoost, CatBoost, scikit-learn, statsmodels, umap-learn, Optuna, missingno
+**Toolchain**: Python 3 + uv, Jupyter, PyTorch, XGBoost, CatBoost, scikit-learn, statsmodels, umap-learn, Optuna, missingno, SHAP, Plotly
 
 ---
 
@@ -41,7 +41,12 @@ raw = raw.rename(columns=RENAME)
 
 df = raw.copy()
 df = df[df['age'] > 0]           # removes impossible age=0 rows
-df = df[df['delinq_90'] < 96]    # removes sentinel values (96, 98 = data-entry codes)
+
+# Sentinel treatment: flag codes 96/98 (data-entry codes), cap all delinquency cols at 10
+DELINQ_COLS = ['delinq_30_59', 'delinq_60_89', 'delinq_90']
+df['delinq_sentinel'] = (df['delinq_90'] >= 96).astype(int)   # binary flag: 1 if sentinel
+for col in DELINQ_COLS:
+    df[col] = df[col].clip(upper=10)                            # cap extreme values
 
 # Missing indicators derived from raw (re-execution-safe: not affected by imputation order)
 df['monthly_income_missing'] = raw.loc[df.index, 'monthly_income'].isna().astype(int)
@@ -52,18 +57,21 @@ df['monthly_income'] = df['monthly_income'].fillna(df['monthly_income'].median()
 df['dependents']     = df['dependents'].fillna(0)
 ```
 
+**Note**: Earlier versions filtered `df = df[df['delinq_90'] < 96]` (dropping sentinels). Current pipeline retains those rows and encodes them with `delinq_sentinel=1` while capping the raw count at 10.
+
 **Missingness facts**:
 
 - `monthly_income`: 19.8% missing — MNAR (higher default rate when income is missing, chi-square confirmed p<0.05)
 - `dependents`: 2.6% missing — imputed with 0 (low MI, conservative assumption)
 
-**Feature set used in MoE / boosting models** (12 total):
+**Feature set used in MoE / boosting models** (13 total):
 
 ```python
 FEATURE_COLS = [
     'unsecured_credit', 'age', 'delinq_30_59', 'debt_ratio',
     'monthly_income', 'open_credit', 'delinq_90', 'real_estate_loans',
     'delinq_60_89', 'dependents', 'monthly_income_missing', 'dependents_missing',
+    'delinq_sentinel',   # added: binary flag for sentinel rows (delinq_90 >= 96)
 ]
 ```
 
@@ -229,13 +237,16 @@ pseudo_r2 = 1 - ll_model / ll_null
 
 ## 4. `notebooks/moe_model_with_log_income.ipynb` (31 cells)
 
-**Key difference from `moe_model.ipynb`**: one line added to data pipeline after imputation:
+**Key differences from `moe_model.ipynb`**:
+
+1. `monthly_income` log1p-transformed after imputation (reduces right skew ≈5–8 → near 0; helps early-epoch convergence; BatchNorm mitigates residual skew)
+2. Sentinel handling: `delinq_sentinel` flag + `.clip(upper=10)` replacing old row-filter
+3. `FEATURE_COLS` now 13 features (+ `delinq_sentinel`)
+4. KD student is a 2-layer `StudentNet` NN (not LR as in original `moe_model.ipynb`)
 
 ```python
+# Applied after imputation so the filled median is also consistently transformed
 df['monthly_income'] = np.log1p(df['monthly_income'])
-# Applied after imputation so the filled median is consistently transformed
-# Rationale: reduces right skew (raw ≈5-8 → near 0), smaller gradient leverage from outliers
-# BatchNorm mitigates skew downstream but log1p helps early-epoch convergence
 ```
 
 ### 4.1 MoE Theory (exact equations from notebook)
@@ -404,7 +415,7 @@ for k in range(N_EXPERTS):
 # Radar/spider chart comparing all three experts on AUC, F1, Precision, Recall
 ```
 
-### 4.8 UMAP (Section 10)
+### 4.8 UMAP 2D (Section 10)
 
 ```python
 np.random.seed(SEED)
@@ -419,7 +430,31 @@ embedding = reducer.fit_transform(X_umap)
 # Panel 4: gate confidence / max gate weight (viridis colormap)
 ```
 
-### 4.9 Knowledge Distillation (Section 11)
+### 4.9 UMAP 3D & Animations (Section 10b) — presentation section
+
+Same 8 000-sample subsample re-used; UMAP refit with `n_components=3`.
+
+```python
+reducer_3d   = umap.UMAP(n_components=3, random_state=SEED, n_neighbors=30, min_dist=0.1)
+embedding_3d = reducer_3d.fit_transform(X_umap)   # (8000, 3)
+```
+
+Four sub-sections:
+
+| Sub-section | Tool | Output |
+| --- | --- | --- |
+| 10b.1 Static 3D scatter | `mpl_toolkits.mplot3d` | 2×2 figure matching 2D panels; fixed `elev=25, azim=45` |
+| 10b.2 Rotating animation — expert territories | `FuncAnimation` → `to_jshtml()` | Single panel, 120 frames × 3°/frame, elevation bobs with sine wave |
+| 10b.3 4-panel synchronised rotation | `FuncAnimation` → `to_jshtml()` | All four colourings rotate in lockstep, 90 frames × 4°/frame |
+| 10b.4 Interactive Plotly 3D | `plotly.graph_objects.Scatter3d` | Drag-to-orbit; dropdown switches colouring (expert / actual / predicted / confidence) |
+
+Animation notes:
+
+- `matplotlib.rcParams['animation.embed_limit'] = 64` prevents truncation of jshtml output
+- Data drawn once before the loop; only `ax.view_init(elev, azim)` called per frame → fast render
+- `plt.close(fig)` before `HTML(anim.to_jshtml())` suppresses the duplicate static frame
+
+### 4.10 Knowledge Distillation (Section 11)
 
 **Soft labels**:
 
@@ -493,17 +528,17 @@ xgb_model = xgb.XGBClassifier(
     n_estimators=2000,
     learning_rate=0.05,
     max_depth=6,
-    min_child_weight=1,
+    min_child_weight=5,        # was 1; higher = more conservative splits
     subsample=0.8,
     colsample_bytree=0.8,
-    scale_pos_weight=n_neg/n_pos,   # handles class imbalance
-    eval_metric='auc',
-    early_stopping_rounds=50,
+    scale_pos_weight=class_ratio,   # handles class imbalance (n_neg/n_pos)
+    eval_metric='aucpr',       # was 'auc'; AUC-PR more informative under imbalance
+    early_stopping_rounds=30,  # was 50
     random_state=SEED,
-    tree_method='hist',
-    use_label_encoder=False,
+    n_jobs=-1,
+    verbosity=0,
 )
-xgb_model.fit(X_train_s, y_train, eval_set=[(X_val_s, y_val)], verbose=False)
+xgb_model.fit(X_train_s, y_train, eval_set=[(X_val_s, y_val)], verbose=100)
 ```
 
 **Feature importance types**:
@@ -515,18 +550,21 @@ xgb_model.fit(X_train_s, y_train, eval_set=[(X_val_s, y_val)], verbose=False)
 ### 5.3 CatBoost (Section 5)
 
 ```python
+train_pool = Pool(X_train_s, y_train, feature_names=FEATURE_COLS)
+val_pool   = Pool(X_val_s,   y_val,   feature_names=FEATURE_COLS)
+
 cat_model = CatBoostClassifier(
     iterations=2000,
     learning_rate=0.05,
     depth=6,
     l2_leaf_reg=3,
-    class_weights={0: 1, 1: n_neg/n_pos},
+    class_weights=[1, class_ratio],   # list format [w_neg, w_pos]; was dict {0:1, 1:ratio}
     eval_metric='AUC',
-    early_stopping_rounds=50,
+    early_stopping_rounds=30,         # was 50
     random_seed=SEED,
-    verbose=False,
+    verbose=100,
 )
-cat_model.fit(X_train_s, y_train, eval_set=(X_val_s, y_val))
+cat_model.fit(train_pool, eval_set=val_pool)   # uses Pool objects (exposes feature names)
 ```
 
 **CatBoost innovations**:
@@ -545,19 +583,23 @@ cat_model.fit(X_train_s, y_train, eval_set=(X_val_s, y_val))
 import optuna
 from optuna.samplers import TPESampler
 
+N_TRIALS = 50
+
 def objective(trial):
     params = {
-        'learning_rate':      trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
-        'depth':              trial.suggest_int('depth', 4, 10),
-        'l2_leaf_reg':        trial.suggest_float('l2_leaf_reg', 1, 10, log=True),
-        'bagging_temperature': trial.suggest_float('bagging_temperature', 0, 1),
-        'random_strength':    trial.suggest_float('random_strength', 0, 10),
-        'border_count':       trial.suggest_int('border_count', 32, 255),
+        'learning_rate':       trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+        'depth':               trial.suggest_int('depth', 4, 10),
+        'iterations':          trial.suggest_int('iterations', 500, 3000),   # added
+        'l2_leaf_reg':         trial.suggest_float('l2_leaf_reg', 1.0, 10.0),
+        'bagging_temperature': trial.suggest_float('bagging_temperature', 0.0, 1.0),
+        'random_strength':     trial.suggest_float('random_strength', 0.0, 10.0),
+        'border_count':        trial.suggest_int('border_count', 32, 255),
+        # fixed: class_weights, eval_metric, early_stopping_rounds=50, random_seed
     }
     # Trains CatBoost with these params, returns val AUC
 
 study = optuna.create_study(direction='maximize', sampler=TPESampler(seed=SEED))
-study.optimize(objective, n_trials=50)
+study.optimize(objective, n_trials=N_TRIALS)
 # Plots: optimisation history, parameter importance
 ```
 
@@ -575,7 +617,48 @@ Plots:
 
 ---
 
-## 6. Cross-Notebook Reference
+## 6. `notebooks/summary.ipynb` (46 cells)
+
+Self-contained consolidation notebook — runs all four models end-to-end then compares them.
+
+### 6.1 Structure
+
+| Section | Cells | Content |
+| --- | --- | --- |
+| §1 Data pipeline | 2 | Same shared pipeline (sentinel, imputation, 13 features) |
+| §2.1 Data profiling | 1 | `describe()` + missing % + skewness table |
+| §2.2 Missingness | 1 | Completeness bar + MNAR chi-square (default rate by income presence) |
+| §2.3 Distributions | 1 | Continuous histograms (raw p99 + log-scale row), discrete bar charts |
+| §2.4 Correlation | 1 | Spearman heatmap + signed r vs normalised MI side-by-side |
+| §3 Split | 1 | 70/15/15 stratified; shared `get_thresholds` + `model_metrics` helpers |
+| §4.1 Logistic Regression | 1 | 13 features, log1p income, `class_weight='balanced'` |
+| §4.2 MoE Teacher | 5 | Full model + training loop (MAX_EPOCHS=200, PATIENCE=30 for speed) |
+| §4.3 KD Student | 2 | Temperature-scaled soft labels (T=3), 2-layer `StudentNet` |
+| §4.4 CatBoost + Optuna | 2 | TPE search N_TRIALS=30, retrain with best params |
+| §5 Comparison | 5 | Metrics table (both threshold strategies), overlaid ROC/PR, bar chart, Optuna history |
+| §6 SHAP | 9 | Per-model beeswarm + mean \|SHAP\| bars + cross-model heatmap & rank table |
+| §7 Summary | 1 | EDA findings table + model recommendation narrative |
+
+### 6.2 SHAP Feature Importance (Section 6)
+
+| Model | Explainer | Notes |
+| --- | --- | --- |
+| Logistic Regression | `shap.LinearExplainer` | Exact; `maskers.Independent` background |
+| MoE Teacher | `shap.GradientExplainer` | `MoELogitWrapper` strips gate output before SHAP sees model |
+| KD Student | `shap.GradientExplainer` | Same 300-sample background tensor |
+| CatBoost (Optuna) | `shap.TreeExplainer` | Exact tree SHAP; guards against `list` return for binary |
+
+`SHAP_N=500` test samples. Three outputs: per-model beeswarm, per-model mean |SHAP| bar, cross-model normalised heatmap + rank table.
+
+### 6.3 Key design decisions
+
+- LR and MoE use log1p(`monthly_income`); CatBoost uses raw (trees invariant to monotonic transforms)
+- Soft labels computed by slicing raw numpy arrays in order — **not** via shuffled `train_loader` (shuffle misalignment bug: concatenated soft labels would not align with `X_tr_m_s` row order)
+- All four models use the same 70/15/15 stratified split for fair comparison
+
+---
+
+## 8. Cross-Notebook Reference
 
 | Convention | Value |
 | --- | --- |
@@ -584,13 +667,14 @@ Plots:
 | Threshold A | Max-F1 on val set |
 | Threshold B | Max recall s.t. Default-class precision ≥ 50% on val set |
 | Primary metrics | ROC-AUC (ranking), Avg Precision (calibrated), F1 (classification) |
-| Notebook creation | All notebooks created/modified via `nbformat` Python scripts written to disk (not the NotebookEdit tool) |
 | Log-income | Only in `moe_model_with_log_income.ipynb` and `eda.ipynb` baseline LR; NOT in `boosting_models.ipynb` (trees invariant to monotonic transforms) |
 | pos_weight (MoE) | 7.0 manually set; data ratio ≈14; reducing from 14→7 trades recall for precision |
+| Sentinel handling | Current: `delinq_sentinel` flag (delinq_90 ≥ 96) + cap all delinq cols at 10; old version dropped sentinel rows entirely |
+| Feature count | 13 features in both MoE and boosting (12 + `delinq_sentinel`); EDA LR uses 10 (no missing indicators, no sentinel) |
 
 ---
 
-## 7. File Structure
+## 9. File Structure
 
 ```text
 DSL_LAB/
@@ -599,11 +683,12 @@ DSL_LAB/
 │   └── Data Dictionary.xls           # official feature descriptions
 ├── notebooks/
 │   ├── eda.ipynb                      # 40 cells: full EDA + VIF + log-transform + baseline LR
-│   ├── moe_model.ipynb                # original MoE (raw monthly_income, LR KD students)
-│   ├── moe_model_with_log_income.ipynb  # 31 cells: MoE + log1p + per-expert analysis + NN KD students
-│   └── boosting_models.ipynb          # 29 cells: XGBoost + CatBoost + Optuna
+│   ├── moe_model.ipynb                # original MoE (raw monthly_income, LR KD students) — kept for reference
+│   ├── moe_model_with_log_income.ipynb  # 41 cells: MoE + log1p + per-expert analysis + 3D UMAP + NN KD students
+│   ├── boosting_models.ipynb          # 29 cells: XGBoost + CatBoost + Optuna
+│   └── summary.ipynb                  # 46 cells: EDA + LR / MoE / KD Student / CatBoost(Optuna) comparison + SHAP
 ├── pyproject.toml                     # uv-managed dependencies
 └── SESSION_SUMMARY.md                 # this file
 ```
 
-**Key dependencies**: `torch`, `xgboost`, `catboost`, `scikit-learn`, `umap-learn`, `optuna`, `statsmodels`, `missingno`
+**Key dependencies**: `torch`, `xgboost`, `catboost`, `scikit-learn`, `umap-learn`, `optuna`, `statsmodels`, `missingno`, `shap`, `plotly`
