@@ -1,0 +1,609 @@
+# DSL_LAB — Session Summary
+
+**Last updated:** 2026-03-27 · Give Me Some Credit (Kaggle) · Credit-Default Modelling
+
+---
+
+## 1. Project Context
+
+**Dataset**: Kaggle *Give Me Some Credit* (2011) — `Data/cs-training.csv`
+
+- 150,000 borrowers; 10 features; binary target `SeriousDlqin2yrs`
+- **Target = 1** if the borrower had 90+ days past-due delinquency within 2 years
+- Default rate ≈ 6.7% → class imbalance ratio ≈ 13.5:1
+- Basel II/III context: PD estimation has direct regulatory and capital consequences
+
+**Toolchain**: Python 3 + uv, Jupyter, PyTorch, XGBoost, CatBoost, scikit-learn, statsmodels, umap-learn, Optuna, missingno
+
+---
+
+## 2. Shared Data Pipeline
+
+Every notebook uses this exact pipeline (copy-pasted, not imported):
+
+```python
+raw = pd.read_csv('../Data/cs-training.csv', index_col=0)
+
+RENAME = {
+    'SeriousDlqin2yrs':                        'defaulted',
+    'RevolvingUtilizationOfUnsecuredLines':     'unsecured_credit',
+    'age':                                      'age',
+    'NumberOfTime30-59DaysPastDueNotWorse':     'delinq_30_59',
+    'DebtRatio':                                'debt_ratio',
+    'MonthlyIncome':                            'monthly_income',
+    'NumberOfOpenCreditLinesAndLoans':          'open_credit',
+    'NumberOfTimes90DaysLate':                  'delinq_90',
+    'NumberRealEstateLoansOrLines':             'real_estate_loans',
+    'NumberOfTime60-89DaysPastDueNotWorse':     'delinq_60_89',
+    'NumberOfDependents':                       'dependents',
+}
+raw = raw.rename(columns=RENAME)
+
+df = raw.copy()
+df = df[df['age'] > 0]           # removes impossible age=0 rows
+df = df[df['delinq_90'] < 96]    # removes sentinel values (96, 98 = data-entry codes)
+
+# Missing indicators derived from raw (re-execution-safe: not affected by imputation order)
+df['monthly_income_missing'] = raw.loc[df.index, 'monthly_income'].isna().astype(int)
+df['dependents_missing']     = raw.loc[df.index, 'dependents'].isna().astype(int)
+
+# Imputation
+df['monthly_income'] = df['monthly_income'].fillna(df['monthly_income'].median())
+df['dependents']     = df['dependents'].fillna(0)
+```
+
+**Missingness facts**:
+
+- `monthly_income`: 19.8% missing — MNAR (higher default rate when income is missing, chi-square confirmed p<0.05)
+- `dependents`: 2.6% missing — imputed with 0 (low MI, conservative assumption)
+
+**Feature set used in MoE / boosting models** (12 total):
+
+```python
+FEATURE_COLS = [
+    'unsecured_credit', 'age', 'delinq_30_59', 'debt_ratio',
+    'monthly_income', 'open_credit', 'delinq_90', 'real_estate_loans',
+    'delinq_60_89', 'dependents', 'monthly_income_missing', 'dependents_missing',
+]
+```
+
+**Train/val/test split** (all notebooks, SEED=42):
+
+```python
+X_temp, X_test, y_temp, y_test = train_test_split(X, y, test_size=0.15, random_state=42, stratify=y)
+X_train, X_val, y_train, y_val = train_test_split(X_temp, y_temp, test_size=0.15/0.85, random_state=42, stratify=y_temp)
+# Result: 70% train / 15% val / 15% test
+```
+
+---
+
+## 3. `notebooks/eda.ipynb` (40 cells)
+
+### 3.1 Imports
+
+```python
+import numpy as np, pandas as pd, matplotlib.pyplot as plt
+import matplotlib.ticker as mticker, seaborn as sns, missingno as msno
+from sklearn.feature_selection import mutual_info_classif
+from scipy import stats
+
+SEED = 42
+GOOD_CLR = '#4C9BE8'   # non-default colour
+BAD_CLR  = '#E8604C'   # default colour
+TARGET_PALETTE = {0: GOOD_CLR, 1: BAD_CLR}
+```
+
+### 3.2 Data Cleaning (exact filters)
+
+```python
+df = raw.copy()
+df = df[df['age'] > 0]
+df = df[df['delinq_90'] < 96]
+# Note: unsecured_credit > 1.0 and debt_ratio > 1.0 are RETAINED as valid signals
+```
+
+### 3.3 Missingness Analysis
+
+Three `missingno` plots: matrix (row-level patterns), bar (completeness per column), heatmap (co-missingness).
+
+MNAR test:
+
+```python
+df['income_missing'] = df['monthly_income'].isnull().astype(int)
+ct = pd.crosstab(df['income_missing'], df['defaulted'])
+chi2, p_val, _, _ = stats.chi2_contingency(ct)
+# → missingness IS significantly associated with default (p < 0.05)
+```
+
+### 3.4 Univariate Analysis
+
+- Continuous features (`age`, `unsecured_credit`, `debt_ratio`, `monthly_income`): histogram + KDE, x-axis clipped to `min(p99, median + 5*IQR)`
+- Discrete features: bar charts capped at 97th percentile
+- Boxplots: `LOG_SCALE_COLS = {"unsecured_credit", "debt_ratio", "monthly_income"}` use log y-scale
+
+**Log-transform cell** (inserted after monthly income plot):
+
+```python
+log_income = np.log1p(df['monthly_income'])
+# Side-by-side: raw (clipped p99) vs log1p histogram
+print(f"Raw skewness   : {df['monthly_income'].skew():.2f}")   # ≈ 5-8
+print(f"Log1p skewness : {log_income.skew():.2f}")              # near 0
+```
+
+### 3.5 Bivariate Analysis
+
+- Violin+box plots split by `defaulted` for 7 features
+- Default rate by age group: `pd.cut(df['age'], bins=range(20, 100, 5))` — dual-axis bar+line
+- Default rate by delinquency count: each delinq col capped at 10, dual-axis
+- Mean feature values table: `df.groupby('defaulted')[feat_cols].mean().T` with `Ratio (Default/Non-Default)` column
+
+### 3.6 Correlation Analysis
+
+```python
+# Pearson and Spearman heatmaps side-by-side (lower triangle only, mask upper)
+corr = df.corr(method='pearson'/'spearman', numeric_only=True)
+mask = np.triu(np.ones_like(corr, dtype=bool))
+
+# Ranked bar chart: target correlation
+target_corr = df.corr(method='spearman', numeric_only=True)['defaulted'].drop('defaulted').sort_values(key=abs)
+# red = positive correlation with default; blue = negative
+
+# Pairplot: top 5 features by |correlation| + target, 3000-row sample
+top_feats = target_corr.abs().nlargest(5).index.tolist() + ['defaulted']
+```
+
+### 3.7 VIF Analysis (inserted after pairplot)
+
+```python
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+from statsmodels.tools.tools import add_constant
+
+VIF_COLS = ['unsecured_credit', 'age', 'delinq_30_59', 'debt_ratio',
+            'monthly_income', 'open_credit', 'delinq_90', 'real_estate_loans',
+            'delinq_60_89', 'dependents']
+
+X_vif = add_constant(df[VIF_COLS].dropna())
+vif_df = pd.DataFrame({
+    'Feature': VIF_COLS,
+    'VIF': [variance_inflation_factor(X_vif.values, i + 1) for i in range(len(VIF_COLS))],
+}).sort_values('VIF', ascending=False)
+# Color coding: crimson=VIF>10 (severe), orange=VIF>5 (moderate), steelblue=fine
+```
+
+### 3.8 Mutual Information
+
+```python
+discrete = ['delinq_30_59', 'delinq_60_89', 'delinq_90', 'open_credit', 'real_estate_loans', 'dependents']
+discrete_mask = [col in discrete for col in X.columns]
+mi_scores = mutual_info_classif(X, y, discrete_features=discrete_mask, random_state=SEED)
+# sklearn uses k-NN estimator for continuous features
+```
+
+Side-by-side comparison: Spearman `|r|` vs MI — sorted by MI descending.
+
+### 3.9 Key Findings (Section 10)
+
+| # | Finding | Implication |
+| --- | --- | --- |
+| 1 | Class imbalance ~13.5:1 | Use class weights / SMOTE / threshold tuning; accuracy is misleading |
+| 2 | `monthly_income` 19.8% missing, MNAR | Median imputation for baseline; multiple imputation for production |
+| 3 | `dependents` 2.6% missing, low MI | Zero imputation; could be dropped |
+| 4 | `delinq_90`, `delinq_30_59`, `delinq_60_89` strongest predictors (both Spearman + MI) | Include all three; check multicollinearity |
+| 5 | `unsecured_credit` moderate positive correlation | High utilisation = financial stress |
+| 6 | `age` negatively correlated | Older borrowers default less; non-linear relationship |
+| 7 | `debt_ratio` + `open_credit` / `real_estate_loans` correlated → VIF risk | L2 regularisation helps for LR |
+| 8 | `monthly_income` heavily right-skewed | log1p before linear models |
+
+### 3.10 Baseline Logistic Regression (Section 11)
+
+```python
+LR_COLS = ['unsecured_credit', 'age', 'delinq_30_59', 'debt_ratio',
+           'monthly_income', 'open_credit', 'delinq_90', 'real_estate_loans',
+           'delinq_60_89', 'dependents']
+
+df_lr = df[LR_COLS + ['defaulted']].copy()
+df_lr['monthly_income'] = np.log1p(df_lr['monthly_income'])   # log transform here
+
+X_tr, X_te, y_tr, y_te = train_test_split(X_lr, y_lr, test_size=0.20, random_state=42, stratify=y_lr)
+scaler_lr = StandardScaler()
+X_tr_s = scaler_lr.fit_transform(X_tr)
+X_te_s = scaler_lr.transform(X_te)
+
+lr = LogisticRegression(max_iter=1000, C=1.0, random_state=42)
+lr.fit(X_tr_s, y_tr)
+
+# McFadden pseudo-R²:
+null_prob = y_tr.mean()
+ll_null   = -log_loss(y_te, np.full_like(probs, null_prob)) * len(y_te)
+ll_model  = -log_loss(y_te, probs) * len(y_te)
+pseudo_r2 = 1 - ll_model / ll_null
+
+# Outputs: intercept, coefficient table (sorted by |coef|) with odds ratios,
+#          ROC-AUC, Avg Precision, McFadden R², Log-Loss, classification_report
+# Plot: horizontal bar chart — crimson=positive coef, steelblue=negative coef
+```
+
+**Note**: LR uses 80/20 split (not 70/15/15) and only 10 features (no missing indicators).
+
+---
+
+## 4. `notebooks/moe_model_with_log_income.ipynb` (31 cells)
+
+**Key difference from `moe_model.ipynb`**: one line added to data pipeline after imputation:
+
+```python
+df['monthly_income'] = np.log1p(df['monthly_income'])
+# Applied after imputation so the filled median is consistently transformed
+# Rationale: reduces right skew (raw ≈5-8 → near 0), smaller gradient leverage from outliers
+# BatchNorm mitigates skew downstream but log1p helps early-epoch convergence
+```
+
+### 4.1 MoE Theory (exact equations from notebook)
+
+Soft-MoE output:
+
+```text
+ŷ = Σ_{k=1}^{K}  g_k(x) · f_k(x)
+
+where:
+  g_k(x) = softmax(W_g · x + b_g)_k        ← gate weight for expert k
+  f_k(x) = Expert_k MLP logit               ← 3-layer MLP with BN + Dropout
+  sigmoid(ŷ) = default probability
+```
+
+Switch Transformer auxiliary loss (Fedus et al., 2022) — prevents expert collapse:
+
+```text
+L_aux = α · K · Σ_{k=1}^{K}  f_k · P_k
+
+where:
+  f_k = fraction of batch hard-routed to expert k  (non-differentiable: argmax)
+  P_k = mean gate weight for expert k               (differentiable: mean of softmax)
+  α = 0.01,  K = 3
+  At perfect balance: f_k = P_k = 1/K → L_aux = α
+
+Total loss: L = L_BCE(pos_weight) + L_aux
+```
+
+### 4.2 Model Classes (exact code)
+
+```python
+class Expert(nn.Module):
+    def __init__(self, input_dim, hidden_dim=64, dropout=0.3):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.BatchNorm1d(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 1),
+        )
+    def forward(self, x):
+        return self.net(x)   # shape: (B, 1)
+
+class GatingNetwork(nn.Module):
+    def __init__(self, input_dim, n_experts=3):
+        super().__init__()
+        self.gate = nn.Sequential(
+            nn.Linear(input_dim, 32),
+            nn.ReLU(),
+            nn.Linear(32, n_experts),
+        )
+    def forward(self, x):
+        return F.softmax(self.gate(x), dim=-1)   # shape: (B, K)
+
+class MixtureOfExperts(nn.Module):
+    def __init__(self, input_dim, n_experts=3, hidden_dim=64, dropout=0.3):
+        super().__init__()
+        self.experts = nn.ModuleList([Expert(input_dim, hidden_dim, dropout) for _ in range(n_experts)])
+        self.gate = GatingNetwork(input_dim, n_experts)
+    def forward(self, x):
+        gate_weights = self.gate(x)                                       # (B, K)
+        expert_outs  = torch.cat([e(x) for e in self.experts], dim=1)    # (B, K)
+        logits = (gate_weights * expert_outs).sum(dim=1)                  # (B,)
+        return logits, gate_weights
+
+def auxiliary_loss(gate_weights, alpha=0.01):
+    K = gate_weights.shape[1]
+    top_k = gate_weights.argmax(dim=1)                    # hard routing, non-differentiable
+    f_k = torch.zeros(K, device=gate_weights.device)
+    for k in range(K):
+        f_k[k] = (top_k == k).float().mean()
+    P_k = gate_weights.mean(dim=0)                        # differentiable
+    return alpha * K * (f_k * P_k).sum()
+```
+
+### 4.3 Hyperparameters (exact values from notebook)
+
+```python
+SEED        = 42
+HIDDEN_DIM  = 64
+DROPOUT     = 0.3
+N_EXPERTS   = 3
+BATCH_SIZE  = 512
+LR          = 1e-3
+WEIGHT_DECAY = 1e-4
+MAX_EPOCHS  = 400
+PATIENCE    = 100          # early stopping on val AUC
+AUX_ALPHA   = 0.01
+TEMPERATURE = 3.0          # for knowledge distillation soft labels
+POS_WEIGHT  = 7.0          # manual override (data ratio ≈14); lower = more precision, less recall
+```
+
+### 4.4 Training Loop
+
+```python
+bce_fn    = nn.BCEWithLogitsLoss(pos_weight=pos_weight_tensor.to(device))
+optimizer = torch.optim.Adam(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='max', factor=0.5, patience=3)
+
+# Per epoch: forward pass → BCE + aux_loss → backward → step → scheduler.step(val_auc)
+# Best state saved by val AUC; restored after patience_counter >= PATIENCE
+```
+
+### 4.5 Threshold Strategies (Section 8)
+
+```python
+PREC_TARGET = 0.50   # minimum Default-class precision
+
+# Strategy A — max F1: thresholds[argmax(f1_vals)]
+# Strategy B — max recall s.t. precision >= PREC_TARGET
+feasible = prec_vals >= PREC_TARGET
+best_idx = feasible.nonzero()[0][np.argmax(rec_vals[feasible])]
+
+# Active threshold used downstream: best_thresh = thresh_prec  (Strategy B)
+```
+
+### 4.6 Expert Specialisation (Section 9)
+
+```python
+dominant_expert = test_gate_w.argmax(axis=1)   # (N_test,)
+gate_confidence = test_gate_w.max(axis=1)
+
+# Per expert: dominant %, mean gate weight, default rate
+# Plots: bar chart of default rate per expert, gate weight distributions, gate confidence histogram
+```
+
+### 4.7 Per-Expert Deep Analysis (Section 9b — added cell)
+
+**Gradient-based feature importance**:
+
+```python
+model.eval()
+all_grads = [[] for _ in range(N_EXPERTS)]
+for i in range(0, len(X_test_s), 256):
+    Xb = torch.tensor(X_test_s[i:i+256], dtype=torch.float32, requires_grad=True).to(device)
+    for k in range(N_EXPERTS):
+        out = model.experts[k](Xb).sum()
+        grad = torch.autograd.grad(out, Xb, retain_graph=(k < N_EXPERTS - 1))[0]
+        all_grads[k].append(grad.abs().detach().cpu().numpy())
+# expert_importance[k] = mean |∂expert_k(x)/∂x|, normalised to sum=1 per expert
+# Plots: heatmap (feature × expert) + grouped bar chart
+```
+
+**Feature profiles** (borrower archetypes per expert):
+
+```python
+profiles = np.array([X_test_s[dominant_expert == k].mean(axis=0) for k in range(N_EXPERTS)])
+# Heatmap: expert × feature, values = mean standardised feature value
+# Reveals which borrower segment each expert handles
+```
+
+**Per-expert metrics**:
+
+```python
+for k in range(N_EXPERTS):
+    mask = dominant_expert == k
+    auc_k = roc_auc_score(y_test[mask], test_probs[mask])
+    f1_k  = f1_score(y_test[mask], (test_probs[mask] >= best_thresh).astype(int))
+    # + precision, recall
+# Radar/spider chart comparing all three experts on AUC, F1, Precision, Recall
+```
+
+### 4.8 UMAP (Section 10)
+
+```python
+np.random.seed(SEED)
+umap_idx  = np.random.choice(len(X_train_s), size=min(8000, len(X_train_s)), replace=False)
+reducer   = umap.UMAP(n_components=2, random_state=SEED, n_neighbors=30, min_dist=0.1)
+embedding = reducer.fit_transform(X_umap)
+
+# 4-panel 2x2 figure:
+# Panel 1: dominant expert (colour by argmax gate weight)  — ec = ['#2196F3', '#FF5722', '#4CAF50']
+# Panel 2: actual class (coolwarm colormap)
+# Panel 3: predicted class (coolwarm colormap)
+# Panel 4: gate confidence / max gate weight (viridis colormap)
+```
+
+### 4.9 Knowledge Distillation (Section 11)
+
+**Soft labels**:
+
+```python
+# Temperature scaling: p_soft = σ(logit_teacher / T)
+TEMPERATURE = 3.0
+# Higher T flattens distribution → richer signal about relative teacher confidence
+```
+
+**Student architecture** (2-layer NN, replacing LR from original):
+
+```python
+class StudentNet(nn.Module):
+    def __init__(self, input_dim, hidden_dim=64, dropout=0.3):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dim, 1),
+        )
+    def forward(self, x):
+        return self.net(x).squeeze(1)   # logit output
+```
+
+**Training function**:
+
+```python
+def train_student(X_tr, y_tr_soft, X_v, y_v_hard, mode='kd',
+                  epochs=100, patience=10, pw=1.0):
+    # mode='kd'   → BCEWithLogitsLoss with soft targets (continuous [0,1]) as labels
+    # mode='hard' → BCEWithLogitsLoss with binary targets + pos_weight
+    # Optimiser: Adam lr=1e-3, weight_decay=1e-4
+    # Scheduler: ReduceLROnPlateau(mode='max', factor=0.5, patience=3) on val AUC
+    # Early stopping: patience=10 on val AUC; saves best state
+```
+
+**KD rationale**: `BCEWithLogitsLoss(logit, soft_target)` directly minimises KL divergence
+between student and teacher distributions. No sklearn duplication trick needed (unlike
+original LR student).
+
+**Three models compared**: MoE Teacher | NN + Soft KD | NN Hard Labels
+
+Metrics: ROC-AUC, Avg Precision, F1, Spearman rank correlation with teacher probabilities
+
+---
+
+## 5. `notebooks/boosting_models.ipynb` (29 cells)
+
+### 5.1 Shared Helpers (Section 3)
+
+```python
+PREC_TARGET = 0.50   # minimum acceptable Default-class precision
+
+def get_thresholds(y_val, val_probs):
+    # Returns thresh_f1 (max F1) and thresh_prec (max recall s.t. precision >= PREC_TARGET)
+    thresholds = np.linspace(0.01, 0.99, 499)
+    ...
+
+def evaluate_model(name, y_test, test_probs, thresh_f1, thresh_prec):
+    # Prints classification reports for both strategies; returns results dict
+
+def plot_results(name, y_test, test_probs, test_preds_f1, test_preds_prec, thresh_f1, thresh_prec):
+    # 4-panel: confusion matrix A, confusion matrix B, ROC curve, PR curve
+```
+
+### 5.2 XGBoost (Section 4)
+
+```python
+xgb_model = xgb.XGBClassifier(
+    n_estimators=2000,
+    learning_rate=0.05,
+    max_depth=6,
+    min_child_weight=1,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    scale_pos_weight=n_neg/n_pos,   # handles class imbalance
+    eval_metric='auc',
+    early_stopping_rounds=50,
+    random_state=SEED,
+    tree_method='hist',
+    use_label_encoder=False,
+)
+xgb_model.fit(X_train_s, y_train, eval_set=[(X_val_s, y_val)], verbose=False)
+```
+
+**Feature importance types**:
+
+- `weight`: number of times feature is used to split across all trees
+- `gain`: average information gain per split (most meaningful)
+- `cover`: average number of samples covered per split
+
+### 5.3 CatBoost (Section 5)
+
+```python
+cat_model = CatBoostClassifier(
+    iterations=2000,
+    learning_rate=0.05,
+    depth=6,
+    l2_leaf_reg=3,
+    class_weights={0: 1, 1: n_neg/n_pos},
+    eval_metric='AUC',
+    early_stopping_rounds=50,
+    random_seed=SEED,
+    verbose=False,
+)
+cat_model.fit(X_train_s, y_train, eval_set=(X_val_s, y_val))
+```
+
+**CatBoost innovations**:
+
+- **Ordered boosting**: prevents target leakage by using a permuted history per sample
+- **Symmetric (oblivious) trees**: same split criterion at each level → faster inference, reduces overfitting
+
+**Feature importance types**:
+
+- `PredictionValuesChange`: how much model predictions change when feature is removed
+- `LossFunctionChange`: how much loss changes when feature is removed (more rigorous)
+
+### 5.4 Optuna Hyperparameter Tuning (Section 6)
+
+```python
+import optuna
+from optuna.samplers import TPESampler
+
+def objective(trial):
+    params = {
+        'learning_rate':      trial.suggest_float('learning_rate', 0.01, 0.3, log=True),
+        'depth':              trial.suggest_int('depth', 4, 10),
+        'l2_leaf_reg':        trial.suggest_float('l2_leaf_reg', 1, 10, log=True),
+        'bagging_temperature': trial.suggest_float('bagging_temperature', 0, 1),
+        'random_strength':    trial.suggest_float('random_strength', 0, 10),
+        'border_count':       trial.suggest_int('border_count', 32, 255),
+    }
+    # Trains CatBoost with these params, returns val AUC
+
+study = optuna.create_study(direction='maximize', sampler=TPESampler(seed=SEED))
+study.optimize(objective, n_trials=50)
+# Plots: optimisation history, parameter importance
+```
+
+**TPE (Tree-structured Parzen Estimator)**: models p(params | good) and p(params | bad) as kernel density estimates, samples from ratio — more efficient than random/grid search.
+
+### 5.5 Model Comparison (Section 7)
+
+Models compared: XGBoost | CatBoost baseline | CatBoost tuned (Optuna)
+
+Plots:
+
+- Overlaid ROC curves (all 3 models, both thresholds)
+- Overlaid PR curves
+- Normalised feature importance: XGBoost `gain` vs CatBoost `PredictionValuesChange` (side-by-side bar chart)
+
+---
+
+## 6. Cross-Notebook Reference
+
+| Convention | Value |
+| --- | --- |
+| SEED | 42 everywhere (`random_state=42`, `torch.manual_seed(42)`, `np.random.seed(42)`) |
+| Split | 70 / 15 / 15 stratified |
+| Threshold A | Max-F1 on val set |
+| Threshold B | Max recall s.t. Default-class precision ≥ 50% on val set |
+| Primary metrics | ROC-AUC (ranking), Avg Precision (calibrated), F1 (classification) |
+| Notebook creation | All notebooks created/modified via `nbformat` Python scripts written to disk (not the NotebookEdit tool) |
+| Log-income | Only in `moe_model_with_log_income.ipynb` and `eda.ipynb` baseline LR; NOT in `boosting_models.ipynb` (trees invariant to monotonic transforms) |
+| pos_weight (MoE) | 7.0 manually set; data ratio ≈14; reducing from 14→7 trades recall for precision |
+
+---
+
+## 7. File Structure
+
+```text
+DSL_LAB/
+├── Data/
+│   ├── cs-training.csv               # raw dataset (~150k rows, 11 cols incl. index)
+│   └── Data Dictionary.xls           # official feature descriptions
+├── notebooks/
+│   ├── eda.ipynb                      # 40 cells: full EDA + VIF + log-transform + baseline LR
+│   ├── moe_model.ipynb                # original MoE (raw monthly_income, LR KD students)
+│   ├── moe_model_with_log_income.ipynb  # 31 cells: MoE + log1p + per-expert analysis + NN KD students
+│   └── boosting_models.ipynb          # 29 cells: XGBoost + CatBoost + Optuna
+├── pyproject.toml                     # uv-managed dependencies
+└── SESSION_SUMMARY.md                 # this file
+```
+
+**Key dependencies**: `torch`, `xgboost`, `catboost`, `scikit-learn`, `umap-learn`, `optuna`, `statsmodels`, `missingno`
