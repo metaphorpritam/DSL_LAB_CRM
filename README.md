@@ -33,18 +33,30 @@ End-to-end credit-default modelling pipeline on the [Kaggle *Give Me Some Credit
 
 ## Project Structure
 
-```
+```text
 DSL_LAB/
 ├── Data/
 │   ├── cs-training.csv              # training set (~150k rows)
-│   ├── cs-test.csv                  # test set
+│   ├── cs-test.csv                  # test set (~101k rows)
 │   ├── sampleEntry.csv              # sample submission
 │   └── Data Dictionary.xls         # official feature descriptions
+├── models/
+│   ├── catboost_tuned.cbm           # CatBoost Optuna-tuned model
+│   ├── catboost_tuned_meta.joblib   # scaler + feature cols + thresholds
+│   └── ...                          # XGBoost, LR, MoE, KD student models
 ├── notebooks/
 │   ├── eda.ipynb                    # exploratory data analysis
 │   ├── moe_model.ipynb              # Mixture-of-Experts (raw income)
 │   ├── moe_model_with_log_income.ipynb  # MoE with log-transformed income
-│   └── boosting_models.ipynb        # XGBoost + CatBoost + Optuna
+│   ├── boosting_models.ipynb        # XGBoost + CatBoost + Optuna
+│   └── summary.ipynb               # all models compared + SHAP
+├── scripts/
+│   ├── predict.py                   # CLI prediction: CatBoost + CIBIL + SHAP → JSON
+│   ├── predict_to_sheet.py          # batch predict → write back to Google Sheet
+│   └── app.py                       # Streamlit credit risk dashboard
+├── secrets/
+│   ├── SETUP.md                     # Google service account setup guide
+│   └── gsheet_credentials.json      # service account key (not committed)
 ├── utils/
 │   └── download_data.py
 ├── SESSION_SUMMARY.md               # detailed implementation reference
@@ -61,6 +73,7 @@ DSL_LAB/
 A comprehensive analysis of the raw data before any modelling.
 
 **Sections:**
+
 - **Missingness Analysis** — `missingno` matrix, MNAR chi-square test for `monthly_income` vs default status, binary missingness indicator creation
 - **Univariate Analysis** — distributions for continuous and discrete features; log-transform demonstration for `monthly_income` (raw skewness ≈ 5–8 → near 0 after `log1p`)
 - **Bivariate Analysis** — violin plots by default status, default rate by age group and delinquency count
@@ -70,6 +83,7 @@ A comprehensive analysis of the raw data before any modelling.
 - **Baseline Logistic Regression** — standardised coefficients with odds ratios, McFadden pseudo-R², ROC-AUC, Average Precision
 
 **Key findings:**
+
 - `delinq_90`, `delinq_30_59`, `delinq_60_89` are the strongest predictors by both Spearman and MI
 - `monthly_income` is heavily right-skewed → `log1p` recommended for linear models
 - `debt_ratio` and credit-line counts show multicollinearity (VIF)
@@ -82,7 +96,7 @@ A **soft Mixture-of-Experts** classifier with a gating network that learns to ro
 
 **Architecture:**
 
-```
+```text
 Input (12 features)
     ├── Expert 0: Linear(12,64) → BN → ReLU → Dropout → Linear(64,64) → BN → ReLU → Dropout → Linear(64,1)
     ├── Expert 1: (same)
@@ -93,12 +107,14 @@ Output logit = Σ  gate_k × expert_k_logit
 ```
 
 **Training:**
+
 - Loss: `BCEWithLogitsLoss(pos_weight=7.0)` + Switch Transformer auxiliary load-balancing loss
 - Optimiser: Adam (`lr=1e-3`, `weight_decay=1e-4`) + `ReduceLROnPlateau`
 - Early stopping on val AUC (patience=100, max 400 epochs)
 - Two threshold strategies: max-F1 and max-recall s.t. precision ≥ 50%
 
 **Sections:**
+
 - **Expert Specialisation** — load distribution, gate weight distributions, default rate per expert
 - **Per-Expert Deep Analysis** — gradient-based feature importance (`|∂f_k/∂x|` per expert), feature profiles (mean standardised values per expert's dominant samples), per-expert AUC / F1 / Precision / Recall with radar chart
 - **UMAP Projection** — 4-panel: expert territories, actual class, predicted class, gate confidence
@@ -125,11 +141,63 @@ Tree-based models as a complement to the MoE neural network.
 | CatBoost (Optuna) | TPE sampler, 50 trials, tunes `lr`, `depth`, `l2_leaf_reg`, `bagging_temperature`, `random_strength`, `border_count` |
 
 **Sections:**
+
 - **Shared evaluation helpers** — `get_thresholds()`, `evaluate_model()`, `plot_results()` (reused for all models)
 - **XGBoost feature importance** — weight, gain, cover side-by-side
 - **CatBoost feature importance** — `PredictionValuesChange` and `LossFunctionChange`
 - **Optuna tuning** — optimisation history and parameter importance plots
 - **Model comparison** — overlaid ROC and PR curves, normalised feature importance comparison
+
+---
+
+## Scripts
+
+### `predict.py` — CLI Prediction
+
+Loads the saved CatBoost tuned model and outputs default probability, CIBIL credit score (300–900), and per-feature SHAP explanations with actionable recommendations.
+
+```bash
+# Read from Google Sheet (last row)
+python scripts/predict.py
+
+# Direct JSON input
+python scripts/predict.py '{"unsecured_credit": 0.8, "age": 45, "delinq_30_59": 1, ...}'
+
+# Custom Google Sheet
+python scripts/predict.py --sheet-id <SHEET_ID>
+```
+
+### `predict_to_sheet.py` — Batch Predict to Google Sheet
+
+Reads all borrower rows from the Google Sheet, runs predictions, and writes results back — including CIBIL score, grade, default probability, top risk drivers with recommendations, and per-feature SHAP values (13 columns).
+
+```bash
+# Dry run (no credentials needed)
+python scripts/predict_to_sheet.py --dry-run
+
+# Write to sheet (requires service account — see secrets/SETUP.md)
+python scripts/predict_to_sheet.py
+```
+
+### `app.py` — Streamlit Credit Risk Dashboard
+
+Interactive web dashboard for exploring credit risk predictions.
+
+**Features:**
+
+- Sidebar with 10 borrower input sliders + "Randomize Customer" button
+- Default probability and prediction verdict (DEFAULT / NO DEFAULT)
+- CIBIL score (300–900) with grade and 4 component sub-scores
+- SHAP feature contribution bar chart (red = risk, green = protective)
+- Risk drivers with expandable improvement recommendations
+- Top-5 prioritized improvement guidance
+
+```bash
+# Launch the dashboard
+python -m streamlit run scripts/app.py
+```
+
+Opens at `http://localhost:8501`. Adjust sliders or click "Randomize Customer" to explore different borrower profiles.
 
 ---
 
@@ -147,9 +215,24 @@ uv sync
 
 # Launch Jupyter
 uv run jupyter notebook
+
+# Launch Streamlit dashboard
+python -m streamlit run scripts/app.py
 ```
 
-**Key dependencies:** `torch`, `xgboost`, `catboost`, `scikit-learn`, `umap-learn`, `optuna`, `statsmodels`, `missingno`, `matplotlib`, `seaborn`
+**Key dependencies:** `torch`, `xgboost`, `catboost`, `scikit-learn`, `umap-learn`, `optuna`, `statsmodels`, `missingno`, `matplotlib`, `seaborn`, `shap`, `streamlit`, `gspread`
+
+### Google Sheet Write-Back Setup
+
+To write predictions back to a Google Sheet, you need a Google Service Account:
+
+1. Create a project at [Google Cloud Console](https://console.cloud.google.com/)
+2. Enable the **Google Sheets API**
+3. Create a Service Account → **Keys** tab → **Add Key → Create new key → JSON**
+4. Save the JSON key as `secrets/gsheet_credentials.json`
+5. Share the Google Sheet with the service account `client_email` as **Editor**
+
+See `secrets/SETUP.md` for detailed step-by-step instructions.
 
 ---
 
@@ -165,6 +248,7 @@ All models are evaluated with:
 | **McFadden pseudo-R²** | Goodness-of-fit for logistic models |
 
 Two threshold strategies are applied to every classifier:
+
 - **Strategy A** — threshold that maximises F1 on the validation set
 - **Strategy B** — highest recall threshold s.t. Default-class precision ≥ 50%
 

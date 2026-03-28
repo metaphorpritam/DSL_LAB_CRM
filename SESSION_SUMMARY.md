@@ -1,6 +1,6 @@
 # DSL_LAB — Session Summary
 
-**Last updated:** 2026-03-28 · Give Me Some Credit (Kaggle) · Credit-Default Modelling · session 3 additions: prediction script with Google Sheet integration, CIBIL scoring, SHAP explanations
+**Last updated:** 2026-03-28 · Give Me Some Credit (Kaggle) · Credit-Default Modelling · session 4 additions: Streamlit dashboard, Google Sheet write-back with SHAP values
 
 ---
 
@@ -13,7 +13,7 @@
 - Default rate ≈ 6.7% → class imbalance ratio ≈ 13.5:1
 - Basel II/III context: PD estimation has direct regulatory and capital consequences
 
-**Toolchain**: Python 3 + uv, Jupyter, PyTorch, XGBoost, CatBoost, scikit-learn, statsmodels, umap-learn, Optuna, missingno, SHAP, Plotly
+**Toolchain**: Python 3 + uv, Jupyter, PyTorch, XGBoost, CatBoost, scikit-learn, statsmodels, umap-learn, Optuna, missingno, SHAP, Plotly, Streamlit, gspread
 
 ---
 
@@ -752,7 +752,95 @@ Uses `shap.TreeExplainer` (exact, fast for CatBoost). Output structure:
 
 ---
 
-## 8. Cross-Notebook Reference
+## 8. `scripts/app.py` — Streamlit Credit Risk Dashboard
+
+### 8.1 Overview
+
+Interactive web dashboard built with Streamlit. Reuses all prediction logic from `predict.py` (model, scaler, SHAP explainer, CIBIL scorer) — no code duplication.
+
+### 8.2 Usage
+
+```bash
+python -m streamlit run scripts/app.py
+```
+
+Opens at `http://localhost:8501`.
+
+### 8.3 Features
+
+| Section | Description |
+| --- | --- |
+| **Sidebar** | 10 borrower input sliders + "Randomize Customer" button (realistic random profiles via exponential/lognormal/Poisson distributions) |
+| **Top Metrics** | Default probability, prediction verdict (DEFAULT / NO DEFAULT), CIBIL score (300–900) with color coding, grade, F1/conservative thresholds |
+| **CIBIL Components** | 4 sub-score gauges: Payment History (35%), Credit Utilization (30%), Credit Mix & Duration (25%), Other Factors (10%) |
+| **SHAP Bar Chart** | Altair horizontal bar chart — red bars = pushes toward default, green = protective. All 13 features, sorted by \|SHAP\| |
+| **Risk Drivers** | Expandable cards for each risk-increasing feature with actionable improvement recommendations |
+| **Protective Factors** | List of features reducing default risk |
+| **Improvement Guidance** | Top-5 prioritized action items to improve the borrower's credit profile |
+| **Raw Inputs** | Expandable JSON view of current borrower inputs |
+
+### 8.4 Architecture
+
+```text
+app.py  →  import from predict.py  →  predict(raw)  →  {probability, CIBIL, SHAP}
+                                                          ↓
+                                                    Streamlit UI
+```
+
+No separate model loading — the `predict.py` module-level globals (`_model`, `_scaler`, `_explainer`) are shared via import.
+
+---
+
+## 9. `scripts/predict_to_sheet.py` — Google Sheet Write-Back
+
+### 9.1 Overview
+
+Reads all borrower rows from the Google Sheet, runs the CatBoost model, and writes predictions, CIBIL scores, and per-feature SHAP values back to the same sheet.
+
+### 9.2 Usage
+
+```bash
+# Dry run (no credentials needed — reads public CSV, prints results)
+python scripts/predict_to_sheet.py --dry-run
+
+# Write to sheet (requires service account)
+python scripts/predict_to_sheet.py
+
+# Custom credentials / sheet
+python scripts/predict_to_sheet.py --creds path/to/key.json --sheet-id <ID> --gid 398026000
+```
+
+### 9.3 Google Service Account Setup
+
+1. Create a Google Cloud Project at [console.cloud.google.com](https://console.cloud.google.com/)
+2. Enable the **Google Sheets API** ([APIs & Services → Library](https://console.cloud.google.com/apis/library))
+3. Create a Service Account ([IAM & Admin → Service Accounts](https://console.cloud.google.com/iam-admin/serviceaccounts))
+4. Download JSON key: Service Account → **Keys** tab → **Add Key → Create new key → JSON**
+5. Save as `secrets/gsheet_credentials.json`
+6. Share the Google Sheet with the service account's `client_email` as **Editor**
+
+Full instructions in `secrets/SETUP.md`.
+
+### 9.4 Output Columns Written
+
+| Column | Description |
+| --- | --- |
+| `CreditScore` | CIBIL score (300–900) |
+| `CIBILGrade` | Excellent / Very Good / Good / Fair / Poor |
+| `DefaultProbability` | Model P(default) |
+| `Prediction` | DEFAULT or NO DEFAULT (F1-optimal threshold) |
+| `TopRiskDriver1-3` | Top 3 features pushing risk up (by SHAP) |
+| `Recommendation1-3` | Actionable improvement tips for each risk driver |
+| `SHAP_<Feature>` (×13) | Per-feature SHAP values for all 13 model features |
+
+### 9.5 Dependencies
+
+- `gspread` — Google Sheets API client (service account auth)
+- All prediction logic imported from `predict.py`
+
+---
+
+## 10. Cross-Notebook & Script Reference
 
 | Convention | Value |
 | --- | --- |
@@ -768,12 +856,13 @@ Uses `shap.TreeExplainer` (exact, fast for CatBoost). Output structure:
 
 ---
 
-## 9. File Structure
+## 11. File Structure
 
 ```text
 DSL_LAB/
 ├── Data/
 │   ├── cs-training.csv               # raw dataset (~150k rows, 11 cols incl. index)
+│   ├── cs-test.csv                    # test set (~101k rows)
 │   └── Data Dictionary.xls           # official feature descriptions
 ├── models/
 │   ├── catboost_tuned.cbm            # CatBoost Optuna-tuned model binary
@@ -789,11 +878,17 @@ DSL_LAB/
 │   └── summary.ipynb                  # 46 cells: EDA + LR / MoE / KD Student / CatBoost(Optuna) comparison + SHAP
 ├── scripts/
 │   ├── predict.py                     # Production prediction: Google Sheet → CatBoost + CIBIL + SHAP → JSON
+│   ├── predict_to_sheet.py            # Batch predict → write results + SHAP values back to Google Sheet
+│   ├── app.py                         # Streamlit credit risk dashboard
 │   ├── data_preprocessing.py          # Shared data preprocessing utilities
 │   └── catboost_pipeline/             # CatBoost pipeline scripts
+├── secrets/
+│   ├── .gitignore                     # blocks all credential files from git
+│   ├── SETUP.md                       # Google service account setup guide
+│   └── gsheet_credentials.json        # service account key (not committed)
 ├── CIBIL_Scoring_Methodology.md       # CIBIL credit score formula documentation (300-900)
 ├── pyproject.toml                     # uv-managed dependencies
 └── SESSION_SUMMARY.md                 # this file
 ```
 
-**Key dependencies**: `torch`, `xgboost`, `catboost`, `scikit-learn`, `umap-learn`, `optuna`, `statsmodels`, `missingno`, `shap`, `plotly`, `pandas`, `joblib`
+**Key dependencies**: `torch`, `xgboost`, `catboost`, `scikit-learn`, `umap-learn`, `optuna`, `statsmodels`, `missingno`, `shap`, `plotly`, `pandas`, `joblib`, `streamlit`, `gspread`
