@@ -24,4 +24,5 @@ dependencies = [
     "shap>=0.51.0",
     "plotly>=6.6.0",
     "nbformat>=5.10.4",
+    "streamlit>=1.45.0",
 ]
