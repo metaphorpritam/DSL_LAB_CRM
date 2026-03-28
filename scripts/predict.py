@@ -64,7 +64,8 @@ def read_google_sheet(sheet_id: str) -> dict:
     if df.empty:
         raise ValueError("Google Sheet has no data rows")
 
-    row = df.iloc[0]  # row 2 in the sheet (first data row after header)
+    # The input row is the last row (CreditScore column is empty / NaN)
+    row = df.iloc[-1]
 
     raw = {}
     for sheet_col, internal_name in COL_MAP.items():
