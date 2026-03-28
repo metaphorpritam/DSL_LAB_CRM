@@ -1,6 +1,6 @@
 # DSL_LAB — Session Summary
 
-**Last updated:** 2026-03-27 · Give Me Some Credit (Kaggle) · Credit-Default Modelling · session 2 additions: summary notebook, 3D UMAP animations, SHAP feature importance
+**Last updated:** 2026-03-28 · Give Me Some Credit (Kaggle) · Credit-Default Modelling · session 3 additions: prediction script with Google Sheet integration, CIBIL scoring, SHAP explanations
 
 ---
 
@@ -658,6 +658,100 @@ Self-contained consolidation notebook — runs all four models end-to-end then c
 
 ---
 
+## 7. `scripts/predict.py` — Production Prediction Script
+
+### 7.1 Overview
+
+Self-contained script that loads the saved CatBoost tuned model and produces three outputs per borrower:
+
+1. **CatBoost default prediction** — probability + binary decisions under two threshold strategies
+2. **CIBIL credit score** (300–900) — weighted component breakdown following CIBIL methodology
+3. **SHAP explanation** — per-feature attribution with risk drivers, protective factors, and actionable improvement recommendations
+
+Designed for **n8n integration** (Execute Command node) and general CLI use.
+
+### 7.2 Input Modes
+
+```bash
+# Mode 1: Read from public Google Sheet (last row = input)
+python scripts/predict.py
+
+# Mode 2: Direct JSON input
+python scripts/predict.py '{"unsecured_credit": 0.8, "age": 45, ...}'
+
+# Mode 3: Custom Google Sheet
+python scripts/predict.py --sheet-id <SHEET_ID>
+```
+
+**Google Sheet format**: Uses original Kaggle column names (`RevolvingUtilizationOfUnsecuredLines`, `NumberOfTimes90DaysLate`, etc.). The script maps them to internal names via `COL_MAP`. Default sheet ID: `1uTb3CsFbyO6TKJBkXLxNNmjhGep8NPgozKgf2GHwbBg`.
+
+### 7.3 Preprocessing Pipeline
+
+Same as training (Section 2): sentinel flag detection (`delinq_90 >= 96`), delinquency clipping at 10, missing indicators for `monthly_income` and `dependents`, median imputation (`MEDIAN_INCOME = 5400.0`), then `StandardScaler` transform from saved metadata.
+
+### 7.4 CIBIL Score Calculation
+
+Per `CIBIL_Scoring_Methodology.md`:
+
+| Component | Weight | Formula |
+| --- | --- | --- |
+| Payment History | 35% | `100 - delinq_90×25 - delinq_60_89×15 - delinq_30_59×7 - default_flag×100` |
+| Credit Utilization | 30% | `100 - utilization×150` |
+| Credit Mix & Duration | 25% | `open_credit×2 + real_estate×10 + age_factor` |
+| Other Factors | 10% | `50 + debt_penalty(-30 if ratio>0.8) + income_bonus(income/10000, max 50)` |
+
+Final: `max(300, min(900, round(300 + weighted_score × 6)))`
+
+Grades: Excellent (≥750), Very Good (≥700), Good (≥650), Fair (≥600), Poor (<600)
+
+### 7.5 SHAP Explanation
+
+Uses `shap.TreeExplainer` (exact, fast for CatBoost). Output structure:
+
+- `feature_contributions`: all 13 features sorted by |SHAP value|, with direction
+- `risk_drivers`: features pushing default probability UP, each with an actionable `recommendation` string
+- `protective_factors`: features pushing default probability DOWN
+- `base_value`: model's average log-odds prediction (baseline before feature effects)
+
+### 7.6 Saved Artefacts Used
+
+| File | Contents |
+| --- | --- |
+| `models/catboost_tuned.cbm` | CatBoost tuned model binary |
+| `models/catboost_tuned_meta.joblib` | `StandardScaler` + `feature_cols` (13) + `thresh_f1` + `thresh_prec` |
+
+### 7.7 Output Schema
+
+```json
+{
+  "default_probability": 0.702847,
+  "prediction_f1": 0,
+  "prediction_conservative": 0,
+  "threshold_f1": 0.7519,
+  "threshold_conservative": 0.9054,
+  "cibil_score": 638,
+  "cibil_grade": "Fair",
+  "cibil_components": {
+    "payment_history": 93.0,
+    "credit_utilization": 0,
+    "credit_mix_duration": 72.0,
+    "other_factors": 58.0
+  },
+  "shap_explanation": {
+    "base_value": 0.068374,
+    "feature_contributions": [ ... ],
+    "risk_drivers": [
+      {"feature": "Revolving Credit Utilization", "impact": 0.6426, "recommendation": "Reduce utilization below 30%..."}
+    ],
+    "protective_factors": [
+      {"feature": "90+ Days Late", "impact": -0.3447}
+    ]
+  }
+}
+```
+
+---
+
 ## 8. Cross-Notebook Reference
 
 | Convention | Value |
@@ -681,14 +775,25 @@ DSL_LAB/
 ├── Data/
 │   ├── cs-training.csv               # raw dataset (~150k rows, 11 cols incl. index)
 │   └── Data Dictionary.xls           # official feature descriptions
+├── models/
+│   ├── catboost_tuned.cbm            # CatBoost Optuna-tuned model binary
+│   ├── catboost_tuned_meta.joblib    # scaler + feature_cols + thresholds
+│   ├── catboost_baseline.cbm         # CatBoost baseline model binary
+│   ├── catboost_baseline_meta.joblib # baseline metadata
+│   └── ...                           # XGBoost, LR, MoE, KD student artefacts
 ├── notebooks/
 │   ├── eda.ipynb                      # 40 cells: full EDA + VIF + log-transform + baseline LR
 │   ├── moe_model.ipynb                # original MoE (raw monthly_income, LR KD students) — kept for reference
 │   ├── moe_model_with_log_income.ipynb  # 41 cells: MoE + log1p + per-expert analysis + 3D UMAP + NN KD students
 │   ├── boosting_models.ipynb          # 29 cells: XGBoost + CatBoost + Optuna
 │   └── summary.ipynb                  # 46 cells: EDA + LR / MoE / KD Student / CatBoost(Optuna) comparison + SHAP
+├── scripts/
+│   ├── predict.py                     # Production prediction: Google Sheet → CatBoost + CIBIL + SHAP → JSON
+│   ├── data_preprocessing.py          # Shared data preprocessing utilities
+│   └── catboost_pipeline/             # CatBoost pipeline scripts
+├── CIBIL_Scoring_Methodology.md       # CIBIL credit score formula documentation (300-900)
 ├── pyproject.toml                     # uv-managed dependencies
 └── SESSION_SUMMARY.md                 # this file
 ```
 
-**Key dependencies**: `torch`, `xgboost`, `catboost`, `scikit-learn`, `umap-learn`, `optuna`, `statsmodels`, `missingno`, `shap`, `plotly`
+**Key dependencies**: `torch`, `xgboost`, `catboost`, `scikit-learn`, `umap-learn`, `optuna`, `statsmodels`, `missingno`, `shap`, `plotly`, `pandas`, `joblib`
