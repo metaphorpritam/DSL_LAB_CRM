@@ -161,8 +161,15 @@ def preprocess(raw: dict) -> np.ndarray:
 # ---------------------------------------------------------------------------
 # CIBIL credit score (300-900) per CIBIL_Scoring_Methodology.md
 # ---------------------------------------------------------------------------
-def cibil_score(raw: dict) -> dict:
-    """Compute CIBIL-aligned credit score from raw borrower inputs."""
+def cibil_score(raw: dict, default_probability: float = 0.0) -> dict:
+    """Compute CIBIL-aligned credit score from raw borrower inputs.
+
+    The composite formula weights:
+      - Default Probability  50%  (ML model P(default) mapped to 0-100)
+      - Payment History      25%  (delinquency penalties)
+      - Credit Utilisation   15%
+      - Credit Mix/Duration  10%
+    """
     delinq_90 = raw.get("delinq_90") or 0
     delinq_60_89 = raw.get("delinq_60_89") or 0
     delinq_30_59 = raw.get("delinq_30_59") or 0
@@ -170,10 +177,8 @@ def cibil_score(raw: dict) -> dict:
     age = raw.get("age") or 0
     open_credit = raw.get("open_credit") or 0
     real_estate = raw.get("real_estate_loans") or 0
-    debt_ratio = raw.get("debt_ratio") or 0
-    monthly_income = raw.get("monthly_income") or 0
 
-    # Component 1: Payment History (35%)
+    # Component 1: Payment History (25%)
     has_default = int(delinq_90 >= 96)  # sentinel codes = default flag
     payment_score = min(100, max(0,
         100
@@ -183,24 +188,23 @@ def cibil_score(raw: dict) -> dict:
         - has_default * 100
     ))
 
-    # Component 2: Credit Utilization (30%)
+    # Component 2: Credit Utilization (15%)
     utilization_score = max(0, min(100, 100 - utilization * 150))
 
-    # Component 3: Credit Mix & Duration (25%)
+    # Component 3: Credit Mix & Duration (10%)
     age_factor = 60.0 if age >= 25 else (age / 25.0) * 60.0
     mix_score = min(100, open_credit * 2 + real_estate * 10 + age_factor)
 
-    # Component 4: Other Factors (10%)
-    debt_penalty = -30 if debt_ratio > 0.80 else 0
-    income_bonus = min(50, monthly_income / 10000.0)
-    other_score = min(100, max(0, 50 + debt_penalty + income_bonus))
+    # Component 4: Default Probability (50%) — ML model output mapped to 0-100
+    # Lower probability = higher score (inverse: good borrower → high component)
+    default_component = (1.0 - default_probability) * 100
 
     # Final weighted score → 300-900 scale
     weighted = (
-        payment_score * 0.35
-        + utilization_score * 0.30
-        + mix_score * 0.25
-        + other_score * 0.10
+        payment_score * 0.25
+        + utilization_score * 0.15
+        + mix_score * 0.10
+        + default_component * 0.50
     )
     score = max(300, min(900, round(300 + weighted * 6)))
 
@@ -220,10 +224,10 @@ def cibil_score(raw: dict) -> dict:
         "cibil_score": score,
         "cibil_grade": grade,
         "components": {
+            "default_probability_component": round(default_component, 2),
             "payment_history": round(payment_score, 2),
             "credit_utilization": round(utilization_score, 2),
             "credit_mix_duration": round(mix_score, 2),
-            "other_factors": round(other_score, 2),
         },
     }
 
@@ -289,7 +293,7 @@ def predict(raw: dict) -> dict:
     X = preprocess(raw)
     prob = float(_model.predict_proba(X)[0, 1])
 
-    cibil = cibil_score(raw)
+    cibil = cibil_score(raw, default_probability=prob)
     shap_explanation = explain(X)
 
     return {

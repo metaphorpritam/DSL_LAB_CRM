@@ -225,12 +225,14 @@ Other_Score = 50 + 0 + 10 = 60 points
 ### Step 1: Weighted Average of Components
 ```
 Weighted_Score = (
-    Payment_History_Score × 0.35
-    + Utilization_Score × 0.30
-    + Mix_Score × 0.25
-    + Other_Score × 0.10
+    Payment_History_Score × 0.25
+    + Utilization_Score × 0.15
+    + Mix_Score × 0.10
+    + Default_Probability_Component × 0.50
 )
 ```
+
+Where `Default_Probability_Component = (1 - ML_Default_Probability) × 100`
 
 **Result:** Value between 0-100 points
 
