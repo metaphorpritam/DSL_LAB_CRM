@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import argparse
 
-import numpy as np
 import optuna
 from optuna.samplers import TPESampler
 from catboost import CatBoostClassifier, Pool
@@ -123,7 +122,6 @@ def main(data_path: str | None = None, n_trials: int = N_TRIALS) -> None:
 
     train_pool = Pool(X_train_s, y_train, feature_names=FEATURE_COLS)
     val_pool   = Pool(X_val_s,   y_val,   feature_names=FEATURE_COLS)
-    test_pool  = Pool(X_test_s,  feature_names=FEATURE_COLS)
 
     # ── Baseline (needed for comparison) ─────────────────────────────────────
     print("\n── CatBoost Baseline ──────────────────────────────────────────")

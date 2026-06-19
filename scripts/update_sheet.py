@@ -12,6 +12,8 @@ Usage:
     python update_sheet.py --creds path/to/creds.json --sheet-id <ID> --gid 398026000
 """
 
+from __future__ import annotations
+
 import argparse
 import sys
 from pathlib import Path
@@ -215,9 +217,11 @@ def main():
         ws = get_worksheet(args.creds, args.sheet_id, args.gid)
         all_data = ws.get_all_values()
     else:
+        # fillna("") so empty cells match the live ws.get_all_values() path
+        # (which returns "" not NaN); otherwise missing-value detection breaks.
         import pandas as pd
         url = f"https://docs.google.com/spreadsheets/d/{args.sheet_id}/export?format=csv&gid={args.gid}"
-        df = pd.read_csv(url, dtype=str)
+        df = pd.read_csv(url, dtype=str).fillna("")
         all_data = [df.columns.tolist()] + df.values.tolist()
 
     if len(all_data) < 2:

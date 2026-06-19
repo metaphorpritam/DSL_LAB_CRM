@@ -97,7 +97,11 @@ _IMPROVEMENT_TIPS = {
 # Google Sheet reader
 # ---------------------------------------------------------------------------
 def read_google_sheet(sheet_id: str) -> dict:
-    """Read row 2 from the public Google Sheet and return a dict with internal names."""
+    """Read the last row of the public Google Sheet and return a dict keyed by internal names.
+
+    The input row is taken as the last row (the one awaiting prediction, whose
+    CreditScore column is still empty).
+    """
     url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv"
     df = pd.read_csv(url)
     if df.empty:
@@ -113,6 +117,12 @@ def read_google_sheet(sheet_id: str) -> dict:
             raw[internal_name] = None
         else:
             raw[internal_name] = float(val)
+
+    if all(v is None for v in raw.values()):
+        raise ValueError(
+            "The last row of the sheet has no usable input values "
+            "(all mapped columns are empty). Check the sheet headers match COL_MAP."
+        )
     return raw
 
 

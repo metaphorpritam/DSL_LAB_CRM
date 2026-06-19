@@ -1,5 +1,0 @@
-# Dry run
-python scripts/update_sheet.py --dry-run
-
-# Run for real
-python scripts/update_sheet.py

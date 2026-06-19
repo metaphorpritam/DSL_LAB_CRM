@@ -20,7 +20,6 @@ from __future__ import annotations
 import argparse
 import time
 
-import numpy as np
 from catboost import Pool
 
 from config import FEATURE_COLS, N_TRIALS

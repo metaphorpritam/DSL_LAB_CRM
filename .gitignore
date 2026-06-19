@@ -1,4 +1,4 @@
-# Python-generated files
+# ── Python-generated files ───────────────────────────────────────────────────
 __pycache__/
 *.py[oc]
 build/
@@ -6,14 +6,36 @@ dist/
 wheels/
 *.egg-info
 
-# Virtual environments
-.venv
+# ── Virtual environments ─────────────────────────────────────────────────────
+.venv/
+venv/
 
-# CatBoost training artifacts
+# ── Jupyter ──────────────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+
+# ── CatBoost training artifacts ──────────────────────────────────────────────
 catboost_info/
 
-# R history
+# ── R history ────────────────────────────────────────────────────────────────
 .Rhistory
 
-# Secrets / credentials
+# ── Secrets / credentials (Google service account, etc.) ─────────────────────
 secrets/
+*.pem
+
+# ── Generated outputs & reports (regenerate by running the notebooks) ────────
+# Notebook figures, executed copies, exported DOCX/PDF/LaTeX reports.
+Output/
+reports/
+
+# ── LaTeX build artifacts ────────────────────────────────────────────────────
+*.aux
+*.toc
+*.out
+*.synctex.gz
+
+# ── OS / editor cruft ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*~
+~$*

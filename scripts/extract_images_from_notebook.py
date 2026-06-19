@@ -14,6 +14,10 @@ import json
 import os
 import base64
 import re
+from pathlib import Path
+
+# Repo root is one level up from scripts/ — lets the script run from any CWD.
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
 
 def extract_images(nb_path, output_dir):
@@ -81,21 +85,21 @@ def main():
     parser = argparse.ArgumentParser(description='Extract images from Jupyter notebooks')
     parser.add_argument('--notebook', type=str, default=None,
                        help='Process a single notebook (default: all notebooks)')
-    parser.add_argument('--output-dir', type=str, default='Output/img',
-                       help='Output directory for images')
+    parser.add_argument('--output-dir', type=str, default=None,
+                       help='Output directory for images (default: <repo>/Output/img)')
     args = parser.parse_args()
 
     notebooks = [
-        'notebooks/eda.ipynb',
-        'notebooks/boosting_models.ipynb',
-        'notebooks/moe_model_with_log_income.ipynb',
-        'notebooks/summary.ipynb',
+        str(REPO_ROOT / 'notebooks' / 'eda.ipynb'),
+        str(REPO_ROOT / 'notebooks' / 'boosting_models.ipynb'),
+        str(REPO_ROOT / 'notebooks' / 'moe_model_with_log_income.ipynb'),
+        str(REPO_ROOT / 'notebooks' / 'summary.ipynb'),
     ]
 
     if args.notebook:
         notebooks = [args.notebook]
 
-    output_dir = args.output_dir
+    output_dir = args.output_dir or str(REPO_ROOT / 'Output' / 'img')
     os.makedirs(output_dir, exist_ok=True)
 
     total_images = 0

@@ -18,6 +18,8 @@ Usage:
     python predict_to_sheet.py --sheet-id <ID> --gid 398026000
 """
 
+from __future__ import annotations
+
 import argparse
 import json
 import math
@@ -152,10 +154,12 @@ def main():
         ws = get_worksheet(args.creds, args.sheet_id, args.gid)
         all_data = ws.get_all_values()
     else:
-        # Dry run: read via public CSV
+        # Dry run: read via public CSV. fillna("") so empty cells match the
+        # live ws.get_all_values() path (which returns "" not NaN); otherwise
+        # row_to_raw would treat NaN as a real value and mis-impute.
         import pandas as pd
         url = f"https://docs.google.com/spreadsheets/d/{args.sheet_id}/export?format=csv&gid={args.gid}"
-        df = pd.read_csv(url, dtype=str)
+        df = pd.read_csv(url, dtype=str).fillna("")
         all_data = [df.columns.tolist()] + df.values.tolist()
 
     if len(all_data) < 2:
@@ -173,8 +177,6 @@ def main():
     else:
         out_start_idx = len(headers)
 
-    # Ensure output headers exist
-    expected_headers = headers[:out_start_idx] + OUTPUT_HEADERS
     results_to_write = []
 
     print(f"Processing {len(data_rows)} row(s)...")

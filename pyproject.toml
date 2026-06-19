@@ -1,9 +1,9 @@
 [project]
 name = "dsl-lab"
 version = "0.1.0"
-description = "Add your description here"
+description = "End-to-end credit-default risk modelling on the Kaggle 'Give Me Some Credit' dataset — EDA, Mixture-of-Experts NN, gradient boosting, knowledge distillation, CIBIL scoring, SHAP, and a Streamlit dashboard."
 readme = "README.md"
-requires-python = ">=3.13,<3.14"
+requires-python = ">=3.11,<3.14"
 dependencies = [
     "ipykernel>=7.2.0",
     "jupyter>=1.1.1",
@@ -25,10 +25,10 @@ dependencies = [
     "plotly>=6.6.0",
     "nbformat>=5.10.4",
     "streamlit>=1.45.0",
+    "altair>=5.0.0",
+    "gspread>=6.0.0",
+    "nbconvert>=7.16.0",
     "google-api-python-client>=2.193.0",
     "google-auth>=2.49.1",
     "google-auth-httplib2>=0.3.1",
 ]
-
-[tool.uv]
-environments = ["sys_platform == 'linux'"]

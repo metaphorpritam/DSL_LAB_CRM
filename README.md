@@ -1,6 +1,24 @@
 # Credit Risk Modelling — Give Me Some Credit
 
-End-to-end credit-default modelling pipeline on the [Kaggle *Give Me Some Credit*](https://www.kaggle.com/c/GiveMeSomeCredit) dataset. Covers exploratory data analysis, a Mixture-of-Experts neural network, gradient boosting models, and knowledge distillation — all implemented in Python with Jupyter notebooks.
+End-to-end credit-default risk modelling on the [Kaggle *Give Me Some Credit*](https://www.kaggle.com/c/GiveMeSomeCredit) dataset. The project covers exploratory data analysis, a Mixture-of-Experts neural network, gradient-boosting models (XGBoost / CatBoost with Optuna tuning), knowledge distillation, a CIBIL-aligned credit-scoring engine, SHAP explanations, a reusable CatBoost training pipeline, and an interactive Streamlit dashboard.
+
+---
+
+## Table of Contents
+
+- [Dataset](#dataset)
+- [Project Structure](#project-structure)
+- [Setup](#setup)
+- [Downloading the Data](#downloading-the-data)
+- [Running the Notebooks](#running-the-notebooks)
+- [Running the Scripts](#running-the-scripts)
+- [The CatBoost Training Pipeline](#the-catboost-training-pipeline)
+- [Input Specification](#input-specification)
+- [CIBIL Scoring Methodology](#cibil-scoring-methodology)
+- [Models](#models)
+- [Evaluation Metrics](#evaluation-metrics)
+- [Notes on Generated Artifacts](#notes-on-generated-artifacts)
+- [References](#references)
 
 ---
 
@@ -12,245 +30,303 @@ End-to-end credit-default modelling pipeline on the [Kaggle *Give Me Some Credit
 | Rows | ~150,000 borrowers |
 | Features | 10 financial / delinquency variables |
 | Target | `SeriousDlqin2yrs` — 1 if 90+ days past due within 2 years |
-| Default rate | ~6.7% (class imbalance ratio ≈ 13.5 : 1) |
+| Default rate | ~6.7% (class-imbalance ratio ≈ 13.5 : 1) |
 
-**Feature reference:**
+**Feature reference** (Kaggle column → friendly name used throughout the code):
 
-| Feature | Description |
-| --- | --- |
-| `unsecured_credit` | Revolving utilisation of unsecured lines (0–1+) |
-| `age` | Borrower age in years |
-| `delinq_30_59` | Times 30–59 days past due in last 2 years |
-| `debt_ratio` | Monthly debt payments / monthly gross income |
-| `monthly_income` | Monthly gross income ($) |
-| `open_credit` | Number of open credit lines and loans |
-| `delinq_90` | Times 90+ days past due |
-| `real_estate_loans` | Number of real estate loans or lines |
-| `delinq_60_89` | Times 60–89 days past due in last 2 years |
-| `dependents` | Number of dependents |
+| Kaggle column | Internal name | Description |
+| --- | --- | --- |
+| `RevolvingUtilizationOfUnsecuredLines` | `unsecured_credit` | Revolving utilisation of unsecured lines (0–1+) |
+| `age` | `age` | Borrower age in years |
+| `NumberOfTime30-59DaysPastDueNotWorse` | `delinq_30_59` | Times 30–59 days past due in last 2 years |
+| `DebtRatio` | `debt_ratio` | Monthly debt payments / monthly gross income |
+| `MonthlyIncome` | `monthly_income` | Monthly gross income ($) |
+| `NumberOfOpenCreditLinesAndLoans` | `open_credit` | Number of open credit lines and loans |
+| `NumberOfTimes90DaysLate` | `delinq_90` | Times 90+ days past due |
+| `NumberRealEstateLoansOrLines` | `real_estate_loans` | Number of real-estate loans or lines |
+| `NumberOfTime60-89DaysPastDueNotWorse` | `delinq_60_89` | Times 60–89 days past due in last 2 years |
+| `NumberOfDependents` | `dependents` | Number of dependents |
 
 ---
 
 ## Project Structure
 
 ```text
-DSL_LAB/
-├── Data/
-│   ├── cs-training.csv              # training set (~150k rows)
-│   ├── cs-test.csv                  # test set (~101k rows)
-│   ├── sampleEntry.csv              # sample submission
-│   └── Data Dictionary.xls         # official feature descriptions
-├── models/
-│   ├── catboost_tuned.cbm           # CatBoost Optuna-tuned model
-│   ├── catboost_tuned_meta.joblib   # scaler + feature cols + thresholds
-│   └── ...                          # XGBoost, LR, MoE, KD student models
-├── notebooks/
-│   ├── eda.ipynb                    # exploratory data analysis
-│   ├── moe_model.ipynb              # Mixture-of-Experts (raw income)
-│   ├── moe_model_with_log_income.ipynb  # MoE with log-transformed income
-│   ├── boosting_models.ipynb        # XGBoost + CatBoost + Optuna
-│   └── summary.ipynb               # all models compared + SHAP
-├── scripts/
-│   ├── predict.py                   # CLI prediction: CatBoost + CIBIL + SHAP → JSON
-│   ├── predict_to_sheet.py          # batch predict → write back to Google Sheet
-│   └── app.py                       # Streamlit credit risk dashboard
-├── secrets/
-│   ├── SETUP.md                     # Google service account setup guide
-│   └── gsheet_credentials.json      # service account key (not committed)
-├── utils/
-│   └── download_data.py
-├── SESSION_SUMMARY.md               # detailed implementation reference
-├── pyproject.toml                   # uv dependencies
+DSL_LAB_CRM/
+├── Data/                                   # input data (Kaggle Give Me Some Credit)
+│   ├── cs-training.csv                     #   training set (~150k rows)
+│   ├── cs-test.csv                         #   test set (~101k rows)
+│   ├── sampleEntry.csv                     #   sample submission
+│   └── Data Dictionary.xls                 #   official feature descriptions
+├── models/                                 # trained model artifacts (regenerated by notebooks)
+│   ├── lr_credit_risk.joblib               #   baseline logistic regression bundle
+│   ├── catboost_baseline.cbm / _meta       #   CatBoost baseline + metadata
+│   ├── catboost_tuned.cbm / _meta          #   CatBoost Optuna-tuned + metadata (used by scripts)
+│   ├── xgb_credit_risk.ubj / _meta         #   XGBoost + metadata
+│   ├── moe_credit_risk.pt                   #   Mixture-of-Experts teacher
+│   └── student_kd / student_hard .pt        #   distilled student networks
+├── notebooks/                              # all notebooks live here
+│   ├── eda.ipynb                           #   exploratory data analysis
+│   ├── boosting_models.ipynb               #   XGBoost + CatBoost + Optuna
+│   ├── moe_model_with_log_income.ipynb     #   Mixture-of-Experts + knowledge distillation
+│   ├── summary.ipynb                       #   all models compared + SHAP
+│   ├── report.ipynb                        #   narrative report (markdown)
+│   └── crm-credit-risk-modelling-and-analysis.Rmd   # R-Markdown companion analysis
+├── scripts/                                # all scripts live here
+│   ├── download_data.py                    #   fetch the Kaggle dataset into Data/
+│   ├── data_preprocessing.py               #   quick-look cleaned-data loader
+│   ├── predict.py                          #   CLI prediction: CatBoost + CIBIL + SHAP → JSON
+│   ├── predict_to_sheet.py                 #   batch predict → append results to a Google Sheet
+│   ├── update_sheet.py                     #   fill missing inputs + predict → write back to a Sheet
+│   ├── app.py                              #   Streamlit credit-risk dashboard
+│   ├── extract_images_from_notebook.py     #   pull rendered figures out of executed notebooks
+│   └── catboost_pipeline/                  #   modular CatBoost training pipeline
+│       ├── config.py · data.py · evaluate.py · train.py · tune.py
+│       └── run.py                          #   end-to-end orchestrator
+├── pyproject.toml                          # uv / PEP-621 dependencies
+├── uv.lock                                 # locked, cross-platform dependency set
+├── .python-version                         # pinned Python (3.13)
 └── README.md
 ```
 
----
-
-## Notebooks
-
-### `eda.ipynb` — Exploratory Data Analysis (40 cells)
-
-A comprehensive analysis of the raw data before any modelling.
-
-**Sections:**
-
-- **Missingness Analysis** — `missingno` matrix, MNAR chi-square test for `monthly_income` vs default status, binary missingness indicator creation
-- **Univariate Analysis** — distributions for continuous and discrete features; log-transform demonstration for `monthly_income` (raw skewness ≈ 5–8 → near 0 after `log1p`)
-- **Bivariate Analysis** — violin plots by default status, default rate by age group and delinquency count
-- **Correlation Analysis** — Pearson and Spearman heatmaps, ranked target correlations, pairplot of top features
-- **VIF Analysis** — Variance Inflation Factors via `statsmodels`; color-coded bar chart (blue = fine, orange = VIF > 5, red = VIF > 10)
-- **Mutual Information** — `sklearn` k-NN MI estimator; side-by-side comparison with Spearman correlation
-- **Baseline Logistic Regression** — standardised coefficients with odds ratios, McFadden pseudo-R², ROC-AUC, Average Precision
-
-**Key findings:**
-
-- `delinq_90`, `delinq_30_59`, `delinq_60_89` are the strongest predictors by both Spearman and MI
-- `monthly_income` is heavily right-skewed → `log1p` recommended for linear models
-- `debt_ratio` and credit-line counts show multicollinearity (VIF)
-
----
-
-### `moe_model_with_log_income.ipynb` — Mixture-of-Experts Neural Network (31 cells)
-
-A **soft Mixture-of-Experts** classifier with a gating network that learns to route each borrower to the most appropriate expert. Uses `log1p(monthly_income)` as an input feature.
-
-**Architecture:**
-
-```text
-Input (12 features)
-    ├── Expert 0: Linear(12,64) → BN → ReLU → Dropout → Linear(64,64) → BN → ReLU → Dropout → Linear(64,1)
-    ├── Expert 1: (same)
-    ├── Expert 2: (same)
-    └── GatingNet: Linear(12,32) → ReLU → Linear(32,3) → Softmax
-
-Output logit = Σ  gate_k × expert_k_logit
-```
-
-**Training:**
-
-- Loss: `BCEWithLogitsLoss(pos_weight=7.0)` + Switch Transformer auxiliary load-balancing loss
-- Optimiser: Adam (`lr=1e-3`, `weight_decay=1e-4`) + `ReduceLROnPlateau`
-- Early stopping on val AUC (patience=100, max 400 epochs)
-- Two threshold strategies: max-F1 and max-recall s.t. precision ≥ 50%
-
-**Sections:**
-
-- **Expert Specialisation** — load distribution, gate weight distributions, default rate per expert
-- **Per-Expert Deep Analysis** — gradient-based feature importance (`|∂f_k/∂x|` per expert), feature profiles (mean standardised values per expert's dominant samples), per-expert AUC / F1 / Precision / Recall with radar chart
-- **UMAP Projection** — 4-panel: expert territories, actual class, predicted class, gate confidence
-- **Knowledge Distillation** — 2-layer NN student (`Linear→ReLU→Dropout→Linear`) trained with temperature-scaled soft labels (T=3); comparison: MoE Teacher vs NN+Soft KD vs NN Hard Labels
-
----
-
-### `moe_model.ipynb` — Mixture-of-Experts (raw income)
-
-Same architecture as above but using raw `monthly_income` (no log transform). Kept as a baseline to isolate the effect of the income transformation.
-
----
-
-### `boosting_models.ipynb` — Gradient Boosting (29 cells)
-
-Tree-based models as a complement to the MoE neural network.
-
-**Models:**
-
-| Model | Key settings |
-| --- | --- |
-| XGBoost | `n_estimators=2000`, `lr=0.05`, `max_depth=6`, `scale_pos_weight=n_neg/n_pos`, early stopping |
-| CatBoost | `iterations=2000`, `lr=0.05`, `depth=6`, ordered boosting, `l2_leaf_reg=3`, early stopping |
-| CatBoost (Optuna) | TPE sampler, 50 trials, tunes `lr`, `depth`, `l2_leaf_reg`, `bagging_temperature`, `random_strength`, `border_count` |
-
-**Sections:**
-
-- **Shared evaluation helpers** — `get_thresholds()`, `evaluate_model()`, `plot_results()` (reused for all models)
-- **XGBoost feature importance** — weight, gain, cover side-by-side
-- **CatBoost feature importance** — `PredictionValuesChange` and `LossFunctionChange`
-- **Optuna tuning** — optimisation history and parameter importance plots
-- **Model comparison** — overlaid ROC and PR curves, normalised feature importance comparison
-
----
-
-## Scripts
-
-### `predict.py` — CLI Prediction
-
-Loads the saved CatBoost tuned model and outputs default probability, CIBIL credit score (300–900), and per-feature SHAP explanations with actionable recommendations.
-
-```bash
-# Read from Google Sheet (last row)
-python scripts/predict.py
-
-# Direct JSON input
-python scripts/predict.py '{"unsecured_credit": 0.8, "age": 45, "delinq_30_59": 1, ...}'
-
-# Custom Google Sheet
-python scripts/predict.py --sheet-id <SHEET_ID>
-```
-
-### `predict_to_sheet.py` — Batch Predict to Google Sheet
-
-Reads all borrower rows from the Google Sheet, runs predictions, and writes results back — including CIBIL score, grade, default probability, top risk drivers with recommendations, and per-feature SHAP values (13 columns).
-
-```bash
-# Dry run (no credentials needed)
-python scripts/predict_to_sheet.py --dry-run
-
-# Write to sheet (requires service account — see secrets/SETUP.md)
-python scripts/predict_to_sheet.py
-```
-
-### `app.py` — Streamlit Credit Risk Dashboard
-
-Interactive web dashboard for exploring credit risk predictions.
-
-**Features:**
-
-- Sidebar with 10 borrower input sliders + "Randomize Customer" button
-- Default probability and prediction verdict (DEFAULT / NO DEFAULT)
-- CIBIL score (300–900) with grade and 4 component sub-scores
-- SHAP feature contribution bar chart (red = risk, green = protective)
-- Risk drivers with expandable improvement recommendations
-- Top-5 prioritized improvement guidance
-
-```bash
-# Launch the dashboard
-python -m streamlit run scripts/app.py
-```
-
-Opens at `http://localhost:8501`. Adjust sliders or click "Randomize Customer" to explore different borrower profiles.
+> Generated outputs (`Output/`, `reports/`) are **not** committed — they are recreated by running the notebooks. See [Notes on Generated Artifacts](#notes-on-generated-artifacts).
 
 ---
 
 ## Setup
 
-This project uses [uv](https://github.com/astral-sh/uv) for dependency management.
+This project uses [uv](https://github.com/astral-sh/uv) for dependency management (Python ≥ 3.11; pinned to 3.13 via `.python-version`).
 
 ```bash
 # Clone
-git clone https://github.com/metaphorpritam/DSL_LAB_CRM.git
+git clone <your-repo-url> DSL_LAB_CRM
 cd DSL_LAB_CRM
 
-# Install dependencies
+# Create the environment and install all dependencies from the lockfile
 uv sync
-
-# Launch Jupyter
-uv run jupyter notebook
-
-# Launch Streamlit dashboard
-python -m streamlit run scripts/app.py
 ```
 
-**Key dependencies:** `torch`, `xgboost`, `catboost`, `scikit-learn`, `umap-learn`, `optuna`, `statsmodels`, `missingno`, `matplotlib`, `seaborn`, `shap`, `streamlit`, `gspread`
+`uv sync` creates a `.venv/` and installs the locked dependency set. Prefix project commands with `uv run` (e.g. `uv run python scripts/predict.py …`) to use that environment, or activate it with `source .venv/bin/activate`.
 
-### Google Sheet Write-Back Setup
+<details>
+<summary>Alternative: plain pip</summary>
 
-To write predictions back to a Google Sheet, you need a Google Service Account:
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -e .          # installs the dependencies declared in pyproject.toml
+```
+</details>
 
-1. Create a project at [Google Cloud Console](https://console.cloud.google.com/)
-2. Enable the **Google Sheets API**
-3. Create a Service Account → **Keys** tab → **Add Key → Create new key → JSON**
-4. Save the JSON key as `secrets/gsheet_credentials.json`
-5. Share the Google Sheet with the service account `client_email` as **Editor**
+**Key dependencies:** `torch`, `xgboost`, `catboost`, `scikit-learn`, `umap-learn`, `optuna`, `statsmodels`, `missingno`, `matplotlib`, `seaborn`, `shap`, `streamlit`, `altair`, `gspread`.
 
-See `secrets/SETUP.md` for detailed step-by-step instructions.
+---
+
+## Downloading the Data
+
+The `Data/` directory already contains the CSVs. To re-download them from Kaggle (requires [kagglehub credentials](https://github.com/Kaggle/kagglehub#authenticate)):
+
+```bash
+uv run python scripts/download_data.py
+```
+
+This fetches the *Give Me Some Credit* competition files and copies them into `Data/`.
+
+---
+
+## Running the Notebooks
+
+Launch Jupyter and open any notebook in `notebooks/`:
+
+```bash
+uv run jupyter lab          # or: uv run jupyter notebook
+```
+
+To execute a notebook headlessly (e.g. to regenerate its outputs):
+
+```bash
+uv run jupyter nbconvert --to notebook --execute --inplace notebooks/eda.ipynb
+```
+
+**Recommended execution order** (later notebooks load models saved by earlier ones):
+
+1. `eda.ipynb` — cleans the data and trains the baseline logistic regression (`lr_credit_risk.joblib`).
+2. `boosting_models.ipynb` — trains and saves XGBoost + CatBoost (baseline & Optuna-tuned).
+3. `moe_model_with_log_income.ipynb` — trains the Mixture-of-Experts teacher and distilled students.
+4. `summary.ipynb` — loads every saved model and compares them with SHAP.
+5. `report.ipynb` — narrative report (markdown; references figures under `Output/img/`).
+
+Each notebook reads data via `../Data/…` and writes models to `../models/…`, so run them from the `notebooks/` working directory (the default when opened in Jupyter).
+
+> The `.Rmd` companion (`crm-credit-risk-modelling-and-analysis.Rmd`) is an R analysis. It requires an R toolchain (`readr`, `readxl`, `ggplot2`, `dplyr`, `tidyr`, `corrplot`, `caret`, `pROC`) and reads from `../Data/`. Knit it with `Rscript -e 'rmarkdown::render("notebooks/crm-credit-risk-modelling-and-analysis.Rmd")'`.
+
+---
+
+## Running the Scripts
+
+All scripts resolve their paths relative to their own location, so they run from any working directory.
+
+### `predict.py` — CLI prediction
+
+Loads the tuned CatBoost model and prints default probability, CIBIL credit score (300–900), and per-feature SHAP explanations with actionable recommendations as JSON.
+
+```bash
+# Direct JSON input (no network needed)
+uv run python scripts/predict.py '{"unsecured_credit": 0.85, "age": 45, "delinq_30_59": 1, "debt_ratio": 0.4, "monthly_income": 5000, "open_credit": 8, "delinq_90": 0, "real_estate_loans": 1, "delinq_60_89": 0, "dependents": 2}'
+
+# Read the last row from a public Google Sheet
+uv run python scripts/predict.py --sheet-id <SHEET_ID>
+```
+
+### `app.py` — Streamlit dashboard
+
+Interactive dashboard: 10 borrower sliders + "Randomize Customer", default probability and verdict, CIBIL score with component breakdown, a SHAP contribution chart, and prioritised improvement guidance.
+
+```bash
+uv run streamlit run scripts/app.py
+```
+
+Opens at `http://localhost:8501`.
+
+### `predict_to_sheet.py` / `update_sheet.py` — Google Sheet write-back
+
+`predict_to_sheet.py` appends predictions to a sheet; `update_sheet.py` additionally imputes any missing input cells before predicting. Both support a credential-free dry run:
+
+```bash
+uv run python scripts/predict_to_sheet.py --dry-run     # reads the public CSV, prints results
+uv run python scripts/update_sheet.py     --dry-run
+```
+
+Writing back requires a Google service-account key at `secrets/gsheet_credentials.json` (see [Google Sheet Write-Back Setup](#google-sheet-write-back-setup)):
+
+```bash
+uv run python scripts/predict_to_sheet.py --sheet-id <ID> --gid <GID>
+```
+
+### `data_preprocessing.py` — quick data check
+
+```bash
+uv run python scripts/data_preprocessing.py    # prints shape, default rate, sentinel-row count
+```
+
+### `extract_images_from_notebook.py` — pull figures from notebooks
+
+Extracts the rendered PNG figures from executed notebooks into `Output/img/<notebook>/`:
+
+```bash
+uv run python scripts/extract_images_from_notebook.py                       # all notebooks
+uv run python scripts/extract_images_from_notebook.py --notebook notebooks/eda.ipynb
+```
+
+---
+
+## The CatBoost Training Pipeline
+
+`scripts/catboost_pipeline/` is a modular, reusable version of the CatBoost workflow from `boosting_models.ipynb`: data loading → baseline training → Optuna hyperparameter search → retrain tuned model → evaluation/comparison plots.
+
+The modules use plain (non-package) imports, so run the orchestrator from inside the pipeline directory:
+
+```bash
+cd scripts/catboost_pipeline
+uv run python run.py                  # full run (50 Optuna trials)
+uv run python run.py --n-trials 5     # quick smoke run
+uv run python run.py --data /path/to/cs-training.csv --n-trials 50
+```
+
+Individual stages can also be run directly (`python tune.py`, `python train.py`). The training data path defaults to the repository's `Data/cs-training.csv` regardless of the current directory.
+
+---
+
+## Input Specification
+
+The 10 input features and the auto-derived features the preprocessing pipeline adds:
+
+| # | Internal name | Type | Range | Notes |
+|---|---|---|---|---|
+| 1 | `unsecured_credit` | Float | 0.0 – 1.5+ | Revolving balance / credit limit. Values > 1.0 are valid (over-limit) |
+| 2 | `age` | Int | 21 – 100 | Rows with `age == 0` are dropped in training |
+| 3 | `delinq_30_59` | Int | 0 – 98 | Clipped to 10. 96/98 are sentinel codes |
+| 4 | `debt_ratio` | Float | 0.0 – 5.0+ | Monthly debt / income. > 1.0 is valid |
+| 5 | `monthly_income` | Float | 0 – 100,000+ | May be blank → imputed to median (≈ 5,400) |
+| 6 | `open_credit` | Int | 0 – 40 | Open credit lines and loans |
+| 7 | `delinq_90` | Int | 0 – 98 | Clipped to 10. 96/98 trigger the sentinel flag |
+| 8 | `real_estate_loans` | Int | 0 – 10 | Mortgage / real-estate loans |
+| 9 | `delinq_60_89` | Int | 0 – 98 | Clipped to 10. 96/98 are sentinel codes |
+| 10 | `dependents` | Int | 0 – 10 | May be blank → imputed to 0 |
+
+**Auto-derived features** (computed by the pipeline; do not supply manually):
+
+| Feature | Value | Derivation |
+|---|---|---|
+| `monthly_income_missing` | 0/1 | 1 if `MonthlyIncome` was blank |
+| `dependents_missing` | 0/1 | 1 if `NumberOfDependents` was blank |
+| `delinq_sentinel` | 0/1 | 1 if raw `NumberOfTimes90DaysLate` ≥ 96 |
+
+**Sentinel codes (96 / 98):** the delinquency columns use 96/98 as data-entry codes rather than real counts. The pipeline flags `delinq_sentinel = 1` when `delinq_90 ≥ 96` and clips all three delinquency columns to a maximum of 10 — preserving the "severe event" signal without distorting the counts.
+
+**Missingness:** `MonthlyIncome` (~19.8% missing, MNAR — higher default rate when missing) is imputed with the median plus a missingness flag; `NumberOfDependents` (~2.6% missing) is imputed with 0 plus a flag.
+
+---
+
+## CIBIL Scoring Methodology
+
+Alongside the model's default probability, `predict.py` computes a CIBIL-style credit score on the **300–900** scale (`scripts/predict.py::cibil_score`). Four components are combined as a weighted average, then mapped to 300–900:
+
+| Component | Weight | Formula (each clamped to 0–100) |
+| --- | --- | --- |
+| **Default Probability (ML)** | **50%** | `(1 − P_default) × 100` — the tuned CatBoost model's output |
+| **Payment History** | **25%** | `100 − 25·delinq_90 − 15·delinq_60_89 − 7·delinq_30_59 − 100·has_default` |
+| **Credit Utilisation** | **15%** | `100 − 150·unsecured_credit` |
+| **Credit Mix & Duration** | **10%** | `2·open_credit + 10·real_estate_loans + age_factor` (`age_factor = 60` if age ≥ 25) |
+
+```text
+weighted = 0.50·default_component + 0.25·payment + 0.15·utilisation + 0.10·mix
+CIBIL    = clamp(300 + 6·weighted, 300, 900)
+```
+
+**Grades:** Excellent (≥ 750) · Very Good (700–749) · Good (650–699) · Fair (600–649) · Poor (< 600).
+
+> These weights and formulas are the single source of truth, mirrored by `app.py` and the report notebook.
+
+---
+
+## Models
+
+| Notebook | Models produced | Saved to `models/` |
+| --- | --- | --- |
+| `eda.ipynb` | Baseline Logistic Regression (log1p income) | `lr_credit_risk.joblib` |
+| `boosting_models.ipynb` | XGBoost, CatBoost baseline, CatBoost Optuna-tuned | `xgb_credit_risk.ubj`, `catboost_baseline.cbm`, `catboost_tuned.cbm` (+ `_meta.joblib`) |
+| `moe_model_with_log_income.ipynb` | Soft Mixture-of-Experts teacher + KD / hard-label students | `moe_credit_risk.pt`, `student_kd_credit_risk.pt`, `student_hard_credit_risk.pt` |
+
+The **Mixture-of-Experts** model uses a softmax gating network routing each borrower across three expert MLPs, trained with `BCEWithLogitsLoss(pos_weight)` plus a Switch-Transformer load-balancing loss, and analysed with gradient-based expert importance, UMAP projections, and per-expert metrics. Knowledge distillation then trains a compact 2-layer student on temperature-scaled soft labels.
+
+`catboost_tuned.cbm` (+ `catboost_tuned_meta.joblib`, which carries the scaler, feature columns, and decision thresholds) is the model served by `predict.py`, `app.py`, and the sheet scripts.
 
 ---
 
 ## Evaluation Metrics
 
-All models are evaluated with:
+All classifiers are evaluated with **ROC-AUC**, **Average Precision**, **F1**, and (for logistic models) **McFadden pseudo-R²**, under two operating points:
 
-| Metric | Why |
-| --- | --- |
-| **ROC-AUC** | Ranking quality; threshold-independent |
-| **Average Precision** | Calibrated ranking; sensitive to class imbalance |
-| **F1 Score** | Balance of precision and recall at chosen threshold |
-| **McFadden pseudo-R²** | Goodness-of-fit for logistic models |
+- **Strategy A — Max-F1:** the threshold maximising Default-class F1 on the validation set.
+- **Strategy B — Prec ≥ 50%:** the highest-recall threshold subject to Default-class precision ≥ 50%.
 
-Two threshold strategies are applied to every classifier:
+---
 
-- **Strategy A** — threshold that maximises F1 on the validation set
-- **Strategy B** — highest recall threshold s.t. Default-class precision ≥ 50%
+## Notes on Generated Artifacts
+
+`Output/` (notebook figures, exported DOCX/PDF/LaTeX) and `reports/` are git-ignored because they are large and fully reproducible:
+
+- Re-run the notebooks to regenerate figures, then `python scripts/extract_images_from_notebook.py` to materialise them under `Output/img/`.
+- `models/` and `Data/` **are** tracked so the prediction scripts and dashboard work on a fresh clone without retraining or re-downloading.
+
+### Google Sheet Write-Back Setup
+
+To let `predict_to_sheet.py` / `update_sheet.py` write back to a sheet:
+
+1. Create a project at the [Google Cloud Console](https://console.cloud.google.com/) and enable the **Google Sheets API**.
+2. Create a **Service Account** → **Keys** → *Add Key → Create new key → JSON*.
+3. Save the JSON key as `secrets/gsheet_credentials.json` (the `secrets/` directory is git-ignored).
+4. Share the target Google Sheet with the service account's `client_email` as **Editor**.
 
 ---
 
@@ -260,4 +336,4 @@ Two threshold strategies are applied to every classifier:
 - Prokhorenkova, L. et al. (2018). *CatBoost: unbiased boosting with categorical features*. NeurIPS.
 - Fedus, W. et al. (2022). *Switch Transformers: Scaling to Trillion Parameter Models*. JMLR.
 - McInnes, L. et al. (2018). *UMAP: Uniform Manifold Approximation and Projection*. JOSS.
-- Rubin, D.B. (1976). *Inference and Missing Data*. Biometrika.
+- Rubin, D. B. (1976). *Inference and Missing Data*. Biometrika.

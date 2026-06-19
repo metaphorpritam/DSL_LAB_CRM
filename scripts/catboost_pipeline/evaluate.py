@@ -219,7 +219,12 @@ def plot_optuna_history(
     trial_aucs  = [t.value  for t in study.trials]
     best_so_far = [max(trial_aucs[: i + 1]) for i in range(len(trial_aucs))]
 
-    importances = optuna.importance.get_param_importances(study)
+    # fANOVA importances need at least two completed trials; skip gracefully
+    # for single-trial smoke runs (e.g. --n-trials 1).
+    importances = (
+        optuna.importance.get_param_importances(study)
+        if len(study.trials) > 1 else {}
+    )
 
     fig, axes = plt.subplots(1, 2, figsize=(14, 5))
 

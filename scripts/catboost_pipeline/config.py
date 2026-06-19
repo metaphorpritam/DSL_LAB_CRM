@@ -2,11 +2,15 @@
 config.py — constants and hyperparameters for the CatBoost pipeline.
 """
 
+from pathlib import Path
+
 # ── Reproducibility ──────────────────────────────────────────────────────────
 SEED = 42
 
 # ── Data ─────────────────────────────────────────────────────────────────────
-DATA_PATH = "../../Data/cs-training.csv"   # relative to this file's directory
+# Resolved relative to this file (…/scripts/catboost_pipeline/) so the pipeline
+# loads the data regardless of the current working directory.
+DATA_PATH = str(Path(__file__).resolve().parents[2] / "Data" / "cs-training.csv")
 
 RENAME = {
     "SeriousDlqin2yrs":                     "defaulted",
@@ -67,7 +71,3 @@ OPTUNA_FIXED = dict(
     random_seed=SEED,
     verbose=0,
 )
-
-# ── Output paths (relative to repo root) ─────────────────────────────────────
-MODELS_DIR  = "models"
-FIGURES_DIR = "figures/catboost"

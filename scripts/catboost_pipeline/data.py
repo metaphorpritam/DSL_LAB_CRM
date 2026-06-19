@@ -6,6 +6,8 @@ Returns:
     make_splits()    → (X_train_s, X_val_s, X_test_s, y_train, y_val, y_test, scaler, class_ratio)
 """
 
+from __future__ import annotations
+
 from pathlib import Path
 
 import numpy as np

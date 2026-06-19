@@ -83,14 +83,6 @@ def score_color(score: int) -> str:
     return "#e74c3c"  # red
 
 
-def prob_color(prob: float) -> str:
-    if prob < 0.10:
-        return "#2ecc71"
-    if prob < 0.30:
-        return "#f39c12"
-    return "#e74c3c"
-
-
 # ---------------------------------------------------------------------------
 # Streamlit App
 # ---------------------------------------------------------------------------
@@ -102,7 +94,7 @@ st.caption("CatBoost model + CIBIL scoring + SHAP explanations")
 # --- Sidebar: customer inputs ---
 st.sidebar.header("Borrower Profile")
 
-if st.sidebar.button("Randomize Customer", type="primary", width="stretch"):
+if st.sidebar.button("Randomize Customer", type="primary", use_container_width=True):
     st.session_state["customer"] = random_customer()
 
 # Initialize defaults
@@ -189,11 +181,13 @@ st.divider()
 st.subheader("CIBIL Score Components")
 
 comp_cols = st.columns(4)
+# Keys + weights must match predict.cibil_score(): default-prob 50%, payment 25%,
+# utilisation 15%, mix/duration 10%.
 comp_names = [
-    ("Payment History", "payment_history", "35%"),
-    ("Credit Utilization", "credit_utilization", "30%"),
-    ("Credit Mix & Duration", "credit_mix_duration", "25%"),
-    ("Other Factors", "other_factors", "10%"),
+    ("Default Probability (ML)", "default_probability_component", "50%"),
+    ("Payment History", "payment_history", "25%"),
+    ("Credit Utilization", "credit_utilization", "15%"),
+    ("Credit Mix & Duration", "credit_mix_duration", "10%"),
 ]
 for col, (label, key, weight) in zip(comp_cols, comp_names):
     val = components[key]
@@ -230,7 +224,7 @@ bars = (
     .properties(height=400)
 )
 
-st.altair_chart(bars, width="stretch")
+st.altair_chart(bars, use_container_width=True)
 
 st.divider()
 
